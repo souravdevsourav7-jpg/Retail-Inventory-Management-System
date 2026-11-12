@@ -46,7 +46,7 @@ function Products() {
   function fetchProducts() {
     axios
       .get(
-        "http://localhost:5000/api/products",
+        "/api/products",
         authConfig
       )
       .then((response) => {
@@ -67,7 +67,7 @@ function Products() {
   function fetchCategories() {
     axios
       .get(
-        "http://localhost:5000/api/categories",
+        "/api/categories",
         authConfig
       )
       .then((response) => {
@@ -149,7 +149,7 @@ function Products() {
     if (editingId !== null) {
       axios
         .put(
-          `http://localhost:5000/api/products/${editingId}`,
+          `/api/products/${editingId}`,
           formData,
           {
             headers: {
@@ -186,7 +186,7 @@ function Products() {
 
     axios
       .post(
-        "http://localhost:5000/api/products",
+        "/api/products",
         formData,
         {
           headers: {
@@ -231,7 +231,7 @@ function Products() {
 
     if (product.image) {
       setImagePreview(
-        `http://localhost:5000${product.image}`
+        `${product.image}`
       );
     } else {
       setImagePreview("");
@@ -261,7 +261,7 @@ function Products() {
 
     axios
       .delete(
-        `http://localhost:5000/api/products/${id}`,
+        `/api/products/${id}`,
         authConfig
       )
       .then(() => {
@@ -371,7 +371,7 @@ function Products() {
       product.image &&
       product.image.trim() !== ""
     ) {
-      return `http://localhost:5000${product.image}`;
+      return `${product.image}`;
     }
 
     return `https://placehold.co/500x300?text=${encodeURIComponent(

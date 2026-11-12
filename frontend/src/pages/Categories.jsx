@@ -100,8 +100,8 @@ function Categories({ onNavigate }) {
       setError("");
 
       const [catRes, prodRes] = await Promise.all([
-        axios.get("http://localhost:5000/api/categories", getAuthConfig()),
-        axios.get("http://localhost:5000/api/products", getAuthConfig()),
+        axios.get("/api/categories", getAuthConfig()),
+        axios.get("/api/products", getAuthConfig()),
       ]);
 
       setCategories(catRes.data || []);
@@ -137,7 +137,7 @@ function Categories({ onNavigate }) {
     if (product && product.image && product.image.trim() !== "") {
       if (product.image.startsWith("http")) return product.image;
       const normalized = product.image.startsWith("/") ? product.image : `/${product.image}`;
-      return `http://localhost:5000${normalized}`;
+      return `${normalized}`;
     }
     return `https://placehold.co/500x400?text=${encodeURIComponent(
       product?.name || "Product"
@@ -181,7 +181,7 @@ function Categories({ onNavigate }) {
 
       if (editingCategory) {
         await axios.put(
-          `http://localhost:5000/api/categories/${editingCategory.id}`,
+          `/api/categories/${editingCategory.id}`,
           {
             name: formData.name.trim(),
             description: formData.description.trim(),
@@ -191,7 +191,7 @@ function Categories({ onNavigate }) {
         showToast("Category updated successfully!");
       } else {
         await axios.post(
-          "http://localhost:5000/api/categories",
+          "/api/categories",
           {
             name: formData.name.trim(),
             description: formData.description.trim(),
@@ -217,7 +217,7 @@ function Categories({ onNavigate }) {
     if (!deletingCategory) return;
     try {
       await axios.delete(
-        `http://localhost:5000/api/categories/${deletingCategory.id}`,
+        `/api/categories/${deletingCategory.id}`,
         getAuthConfig()
       );
       showToast(`Category "${deletingCategory.name}" removed.`);
@@ -266,7 +266,7 @@ function Categories({ onNavigate }) {
       const normalizedPath = productWithImg.image.startsWith("/")
         ? productWithImg.image
         : `/${productWithImg.image}`;
-      return `http://localhost:5000${normalizedPath}`;
+      return `${normalizedPath}`;
     }
 
     // 2. Curated high-resolution royalty-free photography for this category

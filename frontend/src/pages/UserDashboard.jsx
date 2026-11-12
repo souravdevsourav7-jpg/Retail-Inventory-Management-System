@@ -73,10 +73,10 @@ function UserDashboard({ user, onNavigate }) {
 
       const token = localStorage.getItem("token");
       const [prodRes, catRes] = await Promise.all([
-        axios.get("http://localhost:5000/api/products", {
+        axios.get("/api/products", {
           headers: { Authorization: `Bearer ${token}` },
         }),
-        axios.get("http://localhost:5000/api/categories", {
+        axios.get("/api/categories", {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
@@ -238,7 +238,7 @@ function UserDashboard({ user, onNavigate }) {
     if (product && product.image && product.image.trim() !== "") {
       if (product.image.startsWith("http")) return product.image;
       const normalized = product.image.startsWith("/") ? product.image : `/${product.image}`;
-      return `http://localhost:5000${normalized}`;
+      return `${normalized}`;
     }
     return `https://placehold.co/500x400?text=${encodeURIComponent(
       product?.name || "Product"

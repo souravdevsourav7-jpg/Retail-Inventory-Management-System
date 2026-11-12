@@ -231,7 +231,7 @@ function Products({ onNavigate, initialSearch = "" }) {
   function getProductImage(product) {
     if (product.image && product.image.trim() !== "") {
       if (product.image.startsWith("http")) return product.image;
-      return `http://localhost:5000${product.image}`;
+      return `${product.image}`;
     }
     return `https://placehold.co/500x400?text=${encodeURIComponent(
       product.name || "Product"
@@ -309,7 +309,7 @@ function Products({ onNavigate, initialSearch = "" }) {
 
       if (editingId) {
         await axios.put(
-          `http://localhost:5000/api/products/${editingId}`,
+          `/api/products/${editingId}`,
           formData,
           {
             headers: {
@@ -321,7 +321,7 @@ function Products({ onNavigate, initialSearch = "" }) {
         showToast("Product updated successfully!");
       } else {
         await axios.post(
-          "http://localhost:5000/api/products",
+          "/api/products",
           formData,
           {
             headers: {
@@ -347,7 +347,7 @@ function Products({ onNavigate, initialSearch = "" }) {
     if (!deletingProduct) return;
     try {
       await axios.delete(
-        `http://localhost:5000/api/products/${deletingProduct.id}`,
+        `/api/products/${deletingProduct.id}`,
         authConfig
       );
       showToast(`Product "${deletingProduct.name}" deleted.`);

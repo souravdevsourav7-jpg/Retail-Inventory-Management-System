@@ -101,13 +101,17 @@ function Products() {
       return;
     }
 
-    if (!file.type.startsWith("image/")) {
-      alert("Please select an image file.");
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+    if (!allowedTypes.includes(file.type)) {
+      alert("Please select a JPG, PNG, WEBP, or GIF image.");
+      e.target.value = "";
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      alert("Image size should be less than 5MB.");
+    if (file.size > 2 * 1024 * 1024) {
+      alert("Image size must be 2MB or smaller.");
+      e.target.value = "";
       return;
     }
 
@@ -598,7 +602,7 @@ function Products() {
             />
 
             <small>
-              JPG, PNG, JPEG — Max 5MB
+              JPG, PNG, WEBP, GIF — Max 2MB
             </small>
 
           </div>

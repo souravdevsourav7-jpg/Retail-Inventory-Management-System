@@ -164,7 +164,7 @@ function Cart({ onNavigate }) {
   function getProductImage(item) {
     if (item.image && item.image.trim() !== "") {
       if (item.image.startsWith("http")) return item.image;
-      return `http://localhost:5000${item.image}`;
+      return `${item.image}`;
     }
     return `https://placehold.co/200x200?text=${encodeURIComponent(
       item.name || "Product"

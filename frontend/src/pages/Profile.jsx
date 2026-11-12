@@ -53,7 +53,7 @@ function Profile({ user, onNavigate, onLogout }) {
       try {
         setLoadingOrders(true);
         const token = localStorage.getItem("token");
-        const res = await axios.get("http://localhost:5000/api/my-orders", {
+        const res = await axios.get("/api/my-orders", {
           headers: { Authorization: `Bearer ${token}` },
         });
         const orders = res.data || [];

@@ -144,7 +144,7 @@ function Checkout({ onNavigate }) {
         const qty = Number(item.quantity || 1);
 
         const response = await axios.post(
-          "http://localhost:5000/api/orders",
+          "/api/orders",
           {
             product_id: prodId,
             quantity: qty,

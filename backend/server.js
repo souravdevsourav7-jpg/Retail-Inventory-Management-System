@@ -632,7 +632,7 @@ app.get(
         COALESCE(o.current_location, 'Warehouse') AS current_location,
         o.created_at,
         COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
-        p.image AS product_image,
+        CONCAT('/api/products/', p.id, '/image') AS product_image,
         p.category AS product_category,
         u.name AS user_name,
         u.email AS user_email,
@@ -687,6 +687,47 @@ function uploadedImageDataUrl(file) {
 // Continue serving any legacy, repository-tracked images.
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+// Public image endpoint. The image itself stays in MySQL, while list APIs return
+// a small URL instead of copying the image data into every JSON response.
+app.get("/api/products/:id/image", (req, res) => {
+  db.query(
+    "SELECT image FROM products WHERE id = ?",
+    [req.params.id],
+    (error, rows) => {
+      if (error) {
+        console.error("GET PRODUCT IMAGE ERROR:", error.message);
+        return res.status(500).end();
+      }
+
+      if (!rows || rows.length === 0 || !rows[0].image) {
+        return res.status(404).end();
+      }
+
+      const image = String(rows[0].image);
+
+      if (/^https?:\/\//i.test(image)) {
+        return res.redirect(302, image);
+      }
+
+      if (image.startsWith("/uploads/")) {
+        return res.redirect(302, image);
+      }
+
+      const match = image.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
+      if (!match) {
+        return res.status(415).end();
+      }
+
+      const buffer = Buffer.from(match[2], "base64");
+      res.setHeader("Content-Type", match[1]);
+      res.setHeader("Content-Length", buffer.length);
+      res.setHeader("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      return res.send(buffer);
+    }
+  );
+});
+
 // =====================================================
 // PRODUCTS - GET
 // =====================================================
@@ -711,7 +752,14 @@ app.get(
           });
         }
 
-        res.json(results);
+        const products = results.map((product) => ({
+          ...product,
+          image: product.image
+            ? `/api/products/${product.id}/image`
+            : null,
+        }));
+
+        res.json(products);
       }
     );
   }
@@ -1216,7 +1264,7 @@ app.get(
         p.category,
         p.price,
         p.stock,
-        p.image,
+        CONCAT('/api/products/', p.id, '/image') AS image,
         i.id AS inventory_id,
         p.stock AS quantity,
         COALESCE(i.min_stock, 10) AS min_stock,
@@ -1857,7 +1905,7 @@ app.get(
         COALESCE(o.current_location, 'Warehouse') AS current_location,
         o.created_at,
         COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
-        p.image AS product_image,
+        CONCAT('/api/products/', p.id, '/image') AS product_image,
         p.category AS product_category
       FROM orders o
       LEFT JOIN products p ON o.product_id = p.id
@@ -1904,7 +1952,7 @@ app.get(
         COALESCE(o.current_location, 'Warehouse') AS current_location,
         o.created_at,
         COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
-        p.image AS product_image,
+        CONCAT('/api/products/', p.id, '/image') AS product_image,
         p.category AS product_category,
         COALESCE(u.name, 'Customer') AS user_name,
         u.email AS user_email,
@@ -2136,7 +2184,7 @@ app.get(
           COALESCE(o.payment_status, 'Pending') AS payment_status,
           o.created_at,
           COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
-          p.image AS product_image,
+          CONCAT('/api/products/', p.id, '/image') AS product_image,
           p.category AS product_category,
           COALESCE(u.name, 'Customer') AS user_name,
           u.email AS user_email
@@ -2152,7 +2200,7 @@ app.get(
         SELECT
           p.id,
           p.name,
-          p.image,
+          CONCAT('/api/products/', p.id, '/image') AS image,
           p.category,
           p.price,
           p.stock,
@@ -2165,7 +2213,7 @@ app.get(
           ON p.id = o.product_id
           AND o.payment_status != 'Failed'
         GROUP BY
-          p.id, p.name, p.image, p.category, p.price, p.stock
+          p.id, p.name, p.category, p.price, p.stock
         ORDER BY total_sold DESC, p.id DESC
         LIMIT 5
       `);
@@ -2178,7 +2226,7 @@ app.get(
           category,
           price,
           stock,
-          image
+          CONCAT('/api/products/', id, '/image') AS image
         FROM products
         WHERE stock <= 10
         ORDER BY stock ASC

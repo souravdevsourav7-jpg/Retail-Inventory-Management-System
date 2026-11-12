@@ -23,7 +23,45 @@ const crypto = require("crypto");
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+
+app.get("/api/health", (req, res) => {
+  const required = [
+    "DB_HOST",
+    "DB_USER",
+    "DB_PASSWORD",
+    "DB_NAME",
+    "DB_CA_CERT",
+    "JWT_SECRET",
+  ];
+  const missing = required.filter((key) => !process.env[key]);
+
+  if (missing.length) {
+    return res.status(503).json({
+      status: "error",
+      message: "Backend configuration is incomplete",
+      missingEnvironmentVariables: missing,
+      emailConfigured: Boolean(process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD),
+    });
+  }
+
+  db.query("SELECT 1 AS ok", (error) => {
+    if (error) {
+      console.error("HEALTH CHECK DATABASE ERROR:", error.message);
+      return res.status(503).json({
+        status: "error",
+        database: "disconnected",
+        emailConfigured: Boolean(process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD),
+      });
+    }
+
+    return res.json({
+      status: "ok",
+      database: "connected",
+      emailConfigured: Boolean(process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD),
+    });
+  });
+});
 
 // Initialize the database once per server instance.
 let databaseInitialization = null;
@@ -34,9 +72,13 @@ function initializeDatabase() {
       createRequiredTables((tableError) => {
         if (tableError) return reject(tableError);
 
-        setupOrdersTable((setupError) => {
-          if (setupError) return reject(setupError);
-          resolve();
+        ensureProductImageColumn((imageError) => {
+          if (imageError) return reject(imageError);
+
+          setupOrdersTable((setupError) => {
+            if (setupError) return reject(setupError);
+            resolve();
+          });
         });
       });
     }).catch((error) => {
@@ -238,6 +280,37 @@ app.post("/api/verify-otp", (req, res) => {
   );
 });
 
+function hashPassword(password, callback) {
+  crypto.randomBytes(16, (saltError, salt) => {
+    if (saltError) return callback(saltError);
+
+    crypto.scrypt(password, salt, 64, (hashError, derivedKey) => {
+      if (hashError) return callback(hashError);
+      callback(null, "scrypt$" + salt.toString("hex") + "$" + derivedKey.toString("hex"));
+    });
+  });
+}
+
+function verifyPassword(password, storedPassword, callback) {
+  if (typeof storedPassword !== "string" || !storedPassword.startsWith("scrypt$")) {
+    return callback(null, storedPassword === password, true);
+  }
+
+  const parts = storedPassword.split("$");
+  if (!parts[1] || !parts[2]) return callback(null, false, false);
+
+  const expected = Buffer.from(parts[2], "hex");
+  crypto.scrypt(password, Buffer.from(parts[1], "hex"), expected.length, (error, actual) => {
+    if (error) return callback(error);
+
+    const valid =
+      expected.length === actual.length &&
+      crypto.timingSafeEqual(expected, actual);
+
+    callback(null, valid, false);
+  });
+}
+
 // =====================================================
 // REGISTER USER
 // =====================================================
@@ -308,30 +381,39 @@ app.post("/api/register", (req, res) => {
           const sql =
             "INSERT INTO users (name, email, mobile, password, role) VALUES (?, ?, ?, ?, ?)";
 
-          db.query(
-            sql,
-            [name.trim(), emailKey, mobile.trim(), password, "user"],
-            (insertErr, result) => {
-              if (insertErr) {
-                console.error("REGISTER ERROR:", insertErr.message);
-                return res.status(500).json({
-                  message: "Account could not be created",
-                });
-              }
-
-              db.query(
-                "DELETE FROM email_verifications WHERE email = ?",
-                [emailKey],
-                () => {}
-              );
-
-              console.log("USER REGISTERED:", result.insertId);
-              return res.status(201).json({
-                message: "Account created successfully",
-                userId: result.insertId,
+          hashPassword(password, (hashError, passwordHash) => {
+            if (hashError) {
+              console.error("PASSWORD HASH ERROR:", hashError.message);
+              return res.status(500).json({
+                message: "Could not securely create the account",
               });
             }
-          );
+
+            db.query(
+              sql,
+              [name.trim(), emailKey, mobile.trim(), passwordHash, "user"],
+              (insertErr, result) => {
+                if (insertErr) {
+                  console.error("REGISTER ERROR:", insertErr.message);
+                  return res.status(500).json({
+                    message: "Account could not be created",
+                  });
+                }
+
+                db.query(
+                  "DELETE FROM email_verifications WHERE email = ?",
+                  [emailKey],
+                  () => {}
+                );
+
+                console.log("USER REGISTERED:", result.insertId);
+                return res.status(201).json({
+                  message: "Account created successfully",
+                  userId: result.insertId,
+                });
+              }
+            );
+          });
         }
       );
     }
@@ -407,7 +489,7 @@ function requireUser(req, res, next) {
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body || {};
 
-  if (!email || !password) {
+  if (typeof email !== "string" || typeof password !== "string" || !email.trim() || !password) {
     return res.status(400).json({
       message: "Email and password are required",
     });
@@ -415,58 +497,69 @@ app.post("/api/login", (req, res) => {
 
   const emailKey = email.trim().toLowerCase();
 
-  const sql = `
-    SELECT *
-    FROM users
-    WHERE email = ?
-      AND password = ?
-  `;
-
-  db.query(
-    sql,
-    [emailKey, password],
-    (err, results) => {
-      if (err) {
-        console.error("LOGIN ERROR:", err);
-
-        return res.status(500).json({
-          message: "Database error",
-          error: err.message,
-        });
-      }
-
-      if (results.length === 0) {
-        return res.status(401).json({
-          message: "Invalid email or password",
-        });
-      }
-
-      const user = results[0];
-
-      const token = jwt.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-        },
-        process.env.JWT_SECRET,
-        {
-          expiresIn: "1d",
-        }
-      );
-
-      res.json({
-        message: "Login successful",
-        token,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-        },
-      });
+  db.query("SELECT * FROM users WHERE email = ?", [emailKey], (err, results) => {
+    if (err) {
+      console.error("LOGIN ERROR:", err.message);
+      return res.status(500).json({ message: "Database error" });
     }
-  );
+
+    if (!results || results.length === 0) {
+      return res.status(401).json({ message: "Invalid email or password" });
+    }
+
+    const user = results[0];
+
+    verifyPassword(password, user.password, (verifyError, valid, isLegacyPassword) => {
+      if (verifyError) {
+        console.error("PASSWORD VERIFY ERROR:", verifyError.message);
+        return res.status(500).json({ message: "Could not verify credentials" });
+      }
+
+      if (!valid) {
+        return res.status(401).json({ message: "Invalid email or password" });
+      }
+
+      const issueToken = () => {
+        const token = jwt.sign(
+          { id: user.id, email: user.email, role: user.role },
+          process.env.JWT_SECRET,
+          { expiresIn: "1d" }
+        );
+
+        return res.json({
+          message: "Login successful",
+          token,
+          user: {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+          },
+        });
+      };
+
+      if (!isLegacyPassword) return issueToken();
+
+      hashPassword(password, (hashError, passwordHash) => {
+        if (hashError) {
+          console.error("LEGACY PASSWORD HASH ERROR:", hashError.message);
+          return res.status(500).json({ message: "Could not secure account credentials" });
+        }
+
+        db.query(
+          "UPDATE users SET password = ? WHERE id = ?",
+          [passwordHash, user.id],
+          (updateError) => {
+            if (updateError) {
+              console.error("LEGACY PASSWORD UPDATE ERROR:", updateError.message);
+              return res.status(500).json({ message: "Could not secure account credentials" });
+            }
+            return issueToken();
+          }
+        );
+      });
+    });
+  });
 });
 
 // =====================================================
@@ -570,39 +663,26 @@ app.get(
 // IMAGE UPLOAD
 // =====================================================
 
-// Vercel allows temporary writes in /tmp.
-// Uploaded files here are NOT permanently stored.
-
-const uploadDir = path.join("/tmp", "retail-uploads");
-
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-
-  filename: (req, file, cb) => {
-    const uniqueName =
-      Date.now() +
-      "-" +
-      Math.round(Math.random() * 1e9) +
-      path.extname(file.originalname);
-
-    cb(null, uniqueName);
-  },
-});
-
+// Vercel's function filesystem is temporary. Store small images in MySQL
+// so product photos survive cold starts and future deployments.
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, callback) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    if (!allowed.includes(file.mimetype)) {
+      const error = new Error("Only JPG, PNG, WEBP, and GIF images are allowed");
+      error.status = 400;
+      return callback(error);
+    }
+    return callback(null, true);
+  },
 });
 
-app.use(
-  "/uploads",
-  express.static(uploadDir)
-);
+function uploadedImageDataUrl(file) {
+  if (!file) return null;
+  return "data:" + file.mimetype + ";base64," + file.buffer.toString("base64");
+}
 
 // =====================================================
 // PRODUCTS - GET
@@ -658,9 +738,7 @@ app.post(
       });
     }
 
-    const image = req.file
-      ? `/uploads/${req.file.filename}`
-      : null;
+    const image = uploadedImageDataUrl(req.file);
 
     const finalStock = Number(
       stock !== undefined ? stock : (quantity || 0)
@@ -741,7 +819,7 @@ app.put(
     let values;
 
     if (req.file) {
-      const image = `/uploads/${req.file.filename}`;
+      const image = uploadedImageDataUrl(req.file);
 
       sql = `
         UPDATE products
@@ -1431,7 +1509,7 @@ function createRequiredTables(callback) {
       category VARCHAR(255) DEFAULT '',
       price DECIMAL(10,2) NOT NULL DEFAULT 0,
       stock INT NOT NULL DEFAULT 0,
-      image TEXT
+      image MEDIUMTEXT
     ) ENGINE=InnoDB`,
 
     `CREATE TABLE IF NOT EXISTS categories (
@@ -1500,6 +1578,20 @@ function createRequiredTables(callback) {
   }
 
   runNext();
+}
+
+function ensureProductImageColumn(callback) {
+  db.query("SHOW COLUMNS FROM products LIKE 'image'", (error, columns) => {
+    if (error) return callback(error);
+    if (!columns || columns.length === 0) {
+      return callback(new Error("The products.image column is missing"));
+    }
+
+    const currentType = String(columns[0].Type || "").toLowerCase();
+    if (currentType.startsWith("mediumtext")) return callback(null);
+
+    db.query("ALTER TABLE products MODIFY COLUMN image MEDIUMTEXT NULL", callback);
+  });
 }
 
 // =====================================================
@@ -1631,188 +1723,110 @@ app.post(
   authenticateToken,
   requireUser,
   (req, res) => {
-    let {
-      product_id,
-      quantity,
-      payment_status,
-      order_status,
-    } = req.body || {};
+    const productId = Number((req.body || {}).product_id);
+    const quantity = Number((req.body || {}).quantity);
+    const paymentStatus = (req.body || {}).payment_status || "Pending";
+    const orderStatus = (req.body || {}).order_status || "Processing";
 
-    product_id = Number(product_id);
-    quantity = Number(quantity);
-
-    if (!Number.isInteger(product_id) || product_id <= 0) {
-      return res.status(400).json({
-        message: "Invalid product ID",
-      });
+    if (!Number.isInteger(productId) || productId <= 0) {
+      return res.status(400).json({ message: "Invalid product ID" });
     }
-
     if (!Number.isInteger(quantity) || quantity <= 0) {
-      return res.status(400).json({
-        message: "Quantity must be a positive integer",
-      });
+      return res.status(400).json({ message: "Quantity must be a positive integer" });
     }
 
-    db.beginTransaction((trxErr) => {
-      if (trxErr) {
-        console.error("TRANSACTION START ERROR:", trxErr);
-
-        return res.status(500).json({
-          message: "Could not initiate order transaction",
-          error: trxErr.message,
-        });
+    db.getConnection((connectionError, connection) => {
+      if (connectionError) {
+        console.error("ORDER CONNECTION ERROR:", connectionError.message);
+        return res.status(503).json({ message: "Database is temporarily unavailable" });
       }
 
-      db.query(
-        "SELECT * FROM products WHERE id = ? FOR UPDATE",
-        [product_id],
-        (productErr, products) => {
-          if (productErr) {
-            return db.rollback(() => {
-              res.status(500).json({
-                message: "Database error while finding product",
-                error: productErr.message,
-              });
-            });
-          }
+      const fail = (status, payload) => {
+        connection.rollback(() => {
+          connection.release();
+          if (!res.headersSent) res.status(status).json(payload);
+        });
+      };
 
-          if (!products || products.length === 0) {
-            return db.rollback(() => {
-              res.status(404).json({
-                message: "Product not found",
-              });
-            });
-          }
+      connection.beginTransaction((transactionError) => {
+        if (transactionError) {
+          connection.release();
+          console.error("TRANSACTION START ERROR:", transactionError.message);
+          return res.status(500).json({ message: "Could not initiate order transaction" });
+        }
 
-          const product = products[0];
-          const productStock = Number(product.stock || 0);
-          const productPrice = Number(product.price || 0);
+        connection.query(
+          "SELECT * FROM products WHERE id = ? FOR UPDATE",
+          [productId],
+          (productError, products) => {
+            if (productError) return fail(500, { message: "Database error while finding product" });
+            if (!products || products.length === 0) return fail(404, { message: "Product not found" });
 
-          if (productStock < quantity) {
-            return db.rollback(() => {
-              res.status(400).json({
+            const product = products[0];
+            const stock = Number(product.stock || 0);
+            const price = Number(product.price || 0);
+
+            if (stock < quantity) {
+              return fail(400, {
                 message: "Insufficient product stock",
-                availableStock: productStock,
+                availableStock: stock,
                 requestedQuantity: quantity,
               });
-            });
-          }
+            }
 
-          const total = productPrice * quantity;
-          const finalPaymentStatus = payment_status || "Pending";
-          const finalOrderStatus = order_status || "Processing";
+            const total = price * quantity;
+            const insertSql = `
+              INSERT INTO orders
+              (user_id, product_id, quantity, price, amount, total,
+               payment_status, order_status, status, current_location)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+            const values = [
+              req.user.id, productId, quantity, price, total, total,
+              paymentStatus, orderStatus, orderStatus, "Warehouse",
+            ];
 
-          const orderSql = `
-            INSERT INTO orders
-            (
-              user_id,
-              product_id,
-              quantity,
-              price,
-              amount,
-              total,
-              payment_status,
-              order_status,
-              status,
-              current_location
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `;
+            connection.query(insertSql, values, (orderError, orderResult) => {
+              if (orderError) return fail(500, { message: "Order could not be created" });
 
-          const orderValues = [
-            req.user.id,
-            product_id,
-            quantity,
-            productPrice,
-            total,
-            total,
-            finalPaymentStatus,
-            finalOrderStatus,
-            finalOrderStatus,
-            "Warehouse",
-          ];
-
-          db.query(
-            orderSql,
-            orderValues,
-            (orderErr, orderResult) => {
-              if (orderErr) {
-                return db.rollback(() => {
-                  res.status(500).json({
-                    message: "Order could not be created",
-                    error: orderErr.message,
-                  });
-                });
-              }
-
-              const orderId = orderResult.insertId;
-
-              db.query(
-                `
-                UPDATE products
-                SET stock = stock - ?
-                WHERE id = ? AND stock >= ?
-                `,
-                [quantity, product_id, quantity],
-                (updateErr, updateResult) => {
-                  if (updateErr || updateResult.affectedRows === 0) {
-                    return db.rollback(() => {
-                      res.status(400).json({
-                        message: "Insufficient product stock",
-                        availableStock: productStock,
-                        requestedQuantity: quantity,
-                      });
+              connection.query(
+                "UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?",
+                [quantity, productId, quantity],
+                (stockError, stockResult) => {
+                  if (stockError) return fail(500, { message: "Product stock could not be updated" });
+                  if (stockResult.affectedRows === 0) {
+                    return fail(400, {
+                      message: "Insufficient product stock",
+                      availableStock: stock,
+                      requestedQuantity: quantity,
                     });
                   }
 
-                  db.query(
-                    `
-                    UPDATE inventory
-                    SET quantity = GREATEST(0, quantity - ?),
-                        updated_at = NOW()
-                    WHERE product_id = ?
-                    `,
-                    [quantity, product_id],
-                    (inventoryErr) => {
-                      if (inventoryErr) {
-                        return db.rollback(() => {
-                          res.status(500).json({
-                            message: "Inventory update failed",
-                            error: inventoryErr.message,
-                          });
-                        });
-                      }
+                  connection.query(
+                    "UPDATE inventory SET quantity = GREATEST(0, quantity - ?), updated_at = NOW() WHERE product_id = ?",
+                    [quantity, productId],
+                    (inventoryError) => {
+                      if (inventoryError) return fail(500, { message: "Inventory update failed" });
 
-                      db.commit((commitErr) => {
-                        if (commitErr) {
-                          return db.rollback(() => {
-                            res.status(500).json({
-                              message: "Transaction commit failed",
-                              error: commitErr.message,
-                            });
-                          });
-                        }
+                      connection.commit((commitError) => {
+                        if (commitError) return fail(500, { message: "Transaction commit failed" });
 
-                        console.log(
-                          "ORDER CREATED & STOCK DEDUCTED:",
-                          orderId
-                        );
-
+                        connection.release();
                         return res.status(201).json({
                           message: "Order placed successfully",
-                          orderId,
+                          orderId: orderResult.insertId,
                           productName: product.name,
-                          remainingStock: productStock - quantity,
+                          remainingStock: stock - quantity,
                         });
                       });
                     }
                   );
                 }
               );
-            }
-          );
-        }
-      );
+            });
+          }
+        );
+      });
     });
   }
 );
@@ -2231,6 +2245,19 @@ app.get(
 // =====================================================
 
 app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    return res.status(status).json({
+      message: err.code === "LIMIT_FILE_SIZE"
+        ? "Image must be 2 MB or smaller"
+        : "Image upload could not be processed",
+    });
+  }
+
+  if (err.status && err.status < 500) {
+    return res.status(err.status).json({ message: err.message });
+  }
+
   console.error("SERVER ERROR:", err);
 
   if (res.headersSent) {

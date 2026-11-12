@@ -62,8 +62,8 @@ function Inventory() {
       setError("");
 
       const [invRes, catRes] = await Promise.all([
-        axios.get("http://localhost:5000/api/inventory", getAuthConfig()),
-        axios.get("http://localhost:5000/api/categories", getAuthConfig()),
+        axios.get("/api/inventory", getAuthConfig()),
+        axios.get("/api/categories", getAuthConfig()),
       ]);
 
       setInventory(invRes.data || []);
@@ -122,7 +122,7 @@ function Inventory() {
 
     try {
       await axios.put(
-        `http://localhost:5000/api/inventory/stock/${productId}`,
+        `/api/inventory/stock/${productId}`,
         {
           stock: newStock,
           min_stock: minStk,
@@ -157,7 +157,7 @@ function Inventory() {
       const productName = restockProduct.name || restockProduct.product_name || "Product";
 
       await axios.put(
-        `http://localhost:5000/api/inventory/stock/${productId}`,
+        `/api/inventory/stock/${productId}`,
         {
           stock: newStock,
           min_stock: isNaN(minStk) ? 10 : minStk,
@@ -273,7 +273,7 @@ function Inventory() {
   function getProductImage(item) {
     if (item.image && item.image.trim() !== "") {
       if (item.image.startsWith("http")) return item.image;
-      return `http://localhost:5000${item.image}`;
+      return `${item.image}`;
     }
     const displayName = item.name || item.product_name || "Item";
     return `https://placehold.co/100x100?text=${encodeURIComponent(

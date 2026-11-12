@@ -40,7 +40,7 @@ function Users() {
       setLoading(true);
       setError("");
 
-      const response = await axios.get("http://localhost:5000/api/users", {
+      const response = await axios.get("/api/users", {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -67,7 +67,7 @@ function Users() {
 
     try {
       const response = await axios.get(
-        `http://localhost:5000/api/customers/${customer.id}/orders`,
+        `/api/customers/${customer.id}/orders`,
         {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -522,7 +522,7 @@ function Users() {
                               src={
                                 order.product_image.startsWith("http")
                                   ? order.product_image
-                                  : `http://localhost:5000${order.product_image}`
+                                  : `${order.product_image}`
                               }
                               alt={order.product_name || "Product"}
                             />

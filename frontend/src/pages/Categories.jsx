@@ -135,7 +135,7 @@ function Categories({ onNavigate }) {
   // Helper for image url
   function getProductImage(product) {
     if (product && product.image && product.image.trim() !== "") {
-      if (product.image.startsWith("http")) return product.image;
+      if (product.image.startsWith("http") || product.image.startsWith("data:")) return product.image;
       const normalized = product.image.startsWith("/") ? product.image : `/${product.image}`;
       return `${normalized}`;
     }
@@ -262,7 +262,7 @@ function Categories({ onNavigate }) {
     );
 
     if (productWithImg) {
-      if (productWithImg.image.startsWith("http")) return productWithImg.image;
+      if (productWithImg.image.startsWith("http") || productWithImg.image.startsWith("data:")) return productWithImg.image;
       const normalizedPath = productWithImg.image.startsWith("/")
         ? productWithImg.image
         : `/${productWithImg.image}`;

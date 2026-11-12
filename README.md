@@ -1,133 +1,116 @@
 # Retail Inventory Management System
 
-A full-stack web application designed to simplify retail store operations, inventory tracking, product management, and user administration.
+A full-stack retail inventory application built with React, Vite, Node.js, Express, and MySQL.
 
-## Project Overview
+## Features
 
-The Retail Inventory Management System helps manage retail business operations through a web-based interface. It combines a React frontend, Node.js backend, and MySQL database to provide an integrated inventory management solution.
+- Email OTP registration and login
+- JWT-based user and admin access
+- Product and category management
+- Inventory and stock tracking
+- Order placement and order management
+- Admin dashboard and reports
+- Product image uploads stored in MySQL for persistence on serverless hosting
 
-## Technologies Used
+## Technology
 
-**Frontend**
-- React.js
-- Vite
-- React Router
-- Axios
-- Recharts
-- Lucide React
+- Frontend: React, Vite, React Router, Axios, Recharts, Lucide React
+- Backend: Node.js, Express 5, MySQL2, JWT, Nodemailer, Multer
+- Database: MySQL 8+
+- Deployment: Vercel Services and Aiven MySQL
 
-**Backend**
-- Node.js
-- Express.js
-- MySQL
-- JWT Authentication
-- Multer
-- Nodemailer
-
-**Database**
-- MySQL
-
-## Key Features
-
-- User registration and login
-- Email OTP verification
-- JWT-based authentication
-- Product and inventory management
-- Product image upload
-- Inventory-related operations
-- Dashboard and data visualization
-- MySQL database integration
-
-## Project Structure
+## Repository layout
 
 ```text
-Retail-Inventory-Management-System/
-│
+.
 ├── backend/
 │   ├── db.js
-│   ├── index.js
 │   ├── server.js
 │   ├── package.json
-│   └── uploads/
-│
+│   └── .env.example
 ├── frontend/
 │   ├── src/
-│   ├── public/
 │   ├── package.json
 │   └── vite.config.js
-│
-└── .gitignore
+├── vercel.json
+└── README.md
 ```
 
-## Installation and Setup
+## Deploy on Vercel
 
-### 1. Clone the repository
+This repository is configured as a Vercel Services monorepo:
+
+- Frontend service root: `frontend`
+- Backend service root: `backend`
+- API requests: `/api/*` are routed to the backend service
+- All other requests are routed to the frontend service
+
+Import the repository into Vercel and ensure the project uses the **Services** framework/preset. The Vercel Services feature must be enabled for the project.
+
+### Required environment variables
+
+Add these variables in the Vercel project settings for the Production environment (and Preview if needed):
+
+| Variable | Purpose |
+| --- | --- |
+| `DB_HOST` | Aiven MySQL hostname |
+| `DB_PORT` | Aiven MySQL port |
+| `DB_USER` | MySQL username |
+| `DB_PASSWORD` | MySQL password |
+| `DB_NAME` | Database name, for example `defaultdb` |
+| `DB_CA_CERT` | Full Aiven CA certificate |
+| `JWT_SECRET` | Long, random signing secret |
+| `EMAIL_USER` | Gmail address used to send OTP |
+| `EMAIL_APP_PASSWORD` | Gmail App Password |
+
+Do not put real credentials in GitHub. The `backend/.env.example` file contains placeholders only.
+
+Email variables are required for email OTP registration. Database and JWT variables are required for normal API operation.
+
+### Health check
+
+After deployment, open:
+
+`https://YOUR-VERCEL-DOMAIN/api/health`
+
+A healthy deployment returns JSON with `status: "ok"`, `database: "connected"`, and the email configuration status. If the endpoint lists missing variables, add them in Vercel and redeploy.
+
+## Local development
+
+Use Node.js 22.12 or newer and MySQL 8 or newer.
+
+### Backend
 
 ```bash
-git clone https://github.com/souravdevsourav7-jpg/Retail-Inventory-Management-System.git
-```
-
-### 2. Backend Setup
-
-```bash
-cd Retail-Inventory-Management-System/backend
+cd backend
 npm install
+cp .env.example .env
+# Fill in your local or cloud database and email settings.
+npm start
 ```
 
-Create a `.env` file inside the backend folder:
+The backend listens on port 5000 when run locally only if a local server listener is configured. The Vercel entry exports the Express app as a serverless service.
 
-```env
-DB_HOST=localhost
-DB_USER=root
-DB_PASSWORD=your_mysql_password
-DB_NAME=retail_inventory
-JWT_SECRET=your_secret_key
-EMAIL_USER=your_email@gmail.com
-EMAIL_APP_PASSWORD=your_email_app_password
-PORT=5000
-```
-
-Configure your MySQL database and create the required tables before running the application.
-
-Start the backend:
+### Frontend
 
 ```bash
-node server.js
-```
-
-### 3. Frontend Setup
-
-Open another terminal:
-
-```bash
-cd Retail-Inventory-Management-System/frontend
+cd frontend
 npm install
 npm run dev
 ```
 
-Open the local URL displayed by Vite in your browser.
+For local development, configure the Vite development server proxy if the API runs on a separate local process.
 
-## Environment Variables
+## Deployment notes
 
-For security reasons, credentials and secret keys must be stored in environment variables and must never be committed to GitHub.
+- Product images uploaded through the application are stored as data URLs in the MySQL `products.image` column. The backend automatically upgrades that column to `MEDIUMTEXT` during initialization.
+- Image uploads are limited to 2 MB and common image formats (JPG, PNG, WEBP, GIF).
+- The MySQL pool is limited to five connections per backend instance. Keep the total number of concurrent Vercel instances within your Aiven connection limits.
+- The first backend request may take longer while database tables and compatibility columns are checked/created.
+- Keep regular database backups, especially before changing schema or deploying migrations.
 
-## Future Improvements
+## Security notes
 
-- Cloud deployment
-- Advanced inventory analytics
-- Improved security and role management
-- Automated stock alerts
-- Enhanced reporting features
-
-## Author
-
-**Vijay Sharma**
-
-Electrical and Computer Engineering
-
-ABES Engineering College, Ghaziabad
-
-## Repository
-
-[GitHub Repository](https://github.com/souravdevsourav7-jpg/Retail-Inventory-Management-System)
-
+- New passwords are stored using Node.js scrypt hashes. Existing plain-text passwords are upgraded to hashes after the next successful login.
+- Keep `JWT_SECRET`, database credentials, the Aiven CA certificate, and Gmail App Password private.
+- Use a unique, strong admin password and grant admin role only to trusted accounts.

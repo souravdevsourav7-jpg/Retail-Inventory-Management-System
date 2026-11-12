@@ -89,7 +89,7 @@ cp .env.example .env
 npm start
 ```
 
-The backend listens on port 5000 when run locally only if a local server listener is configured. The Vercel entry exports the Express app as a serverless service.
+The `npm start` script starts the exported Express app on port 5000 locally. Vercel imports the same app as a serverless service.
 
 ### Frontend
 
@@ -99,7 +99,7 @@ npm install
 npm run dev
 ```
 
-For local development, configure the Vite development server proxy if the API runs on a separate local process.
+The Vite development server proxies `/api` and `/uploads` to `http://localhost:5000`, so run the backend and frontend in separate terminals.
 
 ## Deployment notes
 

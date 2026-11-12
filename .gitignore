@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Build output
+dist/
+build/
+.vercel/
+
+# Logs and local caches
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/
+
+# Local uploaded files (production uploads are stored in MySQL)
+backend/uploads/

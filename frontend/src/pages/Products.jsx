@@ -110,9 +110,9 @@ function Products({ onNavigate, initialSearch = "" }) {
       setError("");
 
       const [prodRes, catRes] = await Promise.all([
-        axios.get("http://localhost:5000/api/products", authConfig),
-        axios.get("http://localhost:5000/api/categories", authConfig),
-      ]);
+  axios.get("/api/products", authConfig),
+  axios.get("/api/categories", authConfig),
+    ]);
 
       setProducts(prodRes.data || []);
       setCategories(catRes.data || []);

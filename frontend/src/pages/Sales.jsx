@@ -51,7 +51,7 @@ function Sales() {
       setError("");
 
       const response = await axios.get(
-        "http://localhost:5000/api/orders",
+        "/api/orders",
         getAuthConfig()
       );
 
@@ -84,7 +84,7 @@ function Sales() {
       setSuccessId(null);
 
       await axios.put(
-        `http://localhost:5000/api/orders/${order.id}`,
+        `/api/orders/${order.id}`,
         {
           payment_status: order.payment_status || "Pending",
           order_status: order.order_status || "Processing",
@@ -428,7 +428,7 @@ function Sales() {
                             src={
                               order.product_image.startsWith("http")
                                 ? order.product_image
-                                : `http://localhost:5000${order.product_image}`
+                                : `${order.product_image}`
                             }
                             alt={order.product_name || "Product"}
                           />

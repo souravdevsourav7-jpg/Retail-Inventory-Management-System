@@ -1342,6 +1342,85 @@ app.delete(
 // ORDERS TABLE SETUP
 // =====================================================
 
+function createRequiredTables(callback) {
+  const queries = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(150) NOT NULL,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      mobile VARCHAR(20) NOT NULL,
+      password VARCHAR(255) NOT NULL,
+      role VARCHAR(20) NOT NULL DEFAULT 'user'
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS products (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      category VARCHAR(255) DEFAULT '',
+      price DECIMAL(10,2) NOT NULL DEFAULT 0,
+      stock INT NOT NULL DEFAULT 0,
+      image TEXT
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS categories (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      description VARCHAR(255) DEFAULT ''
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS inventory (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      product_id INT NOT NULL UNIQUE,
+      warehouse_id VARCHAR(100) DEFAULT NULL,
+      quantity INT NOT NULL DEFAULT 0,
+      min_stock INT NOT NULL DEFAULT 10,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_id) REFERENCES products(id)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS orders (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      product_id INT NOT NULL,
+      quantity INT NOT NULL,
+      price DECIMAL(10,2) NOT NULL DEFAULT 0,
+      amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+      total DECIMAL(10,2) NOT NULL DEFAULT 0,
+      payment_status VARCHAR(50) DEFAULT 'Pending',
+      order_status VARCHAR(50) DEFAULT 'Processing',
+      status VARCHAR(50) DEFAULT 'Processing',
+      current_location VARCHAR(255) DEFAULT 'Warehouse',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    ) ENGINE=InnoDB`
+  ];
+
+  let index = 0;
+
+  function runNext() {
+    if (index >= queries.length) {
+      console.log("All five database tables are ready.");
+      return callback(null);
+    }
+
+    db.query(queries[index], (err) => {
+      if (err) {
+        console.error("TABLE CREATION ERROR:", err.message);
+        return callback(err);
+      }
+
+      index++;
+      runNext();
+    });
+  }
+
+  runNext();
+}
+
+
 function setupOrdersTable(callback) {
   db.query(
     "SHOW COLUMNS FROM orders",

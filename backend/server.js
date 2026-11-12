@@ -1,17 +1,20 @@
+
 // =====================================================
 // IMPORTS
 // =====================================================
 
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const db = require("./db");
-require("dotenv").config();
 
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 
 // =====================================================
 // APP SETUP
@@ -22,14 +25,41 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Initialize the database once per server instance.
+let databaseInitialization = null;
+
+function initializeDatabase() {
+  if (!databaseInitialization) {
+    databaseInitialization = new Promise((resolve, reject) => {
+      createRequiredTables((tableError) => {
+        if (tableError) return reject(tableError);
+
+        setupOrdersTable((setupError) => {
+          if (setupError) return reject(setupError);
+          resolve();
+        });
+      });
+    }).catch((error) => {
+      databaseInitialization = null;
+      throw error;
+    });
+  }
+
+  return databaseInitialization;
+}
+
+app.use((req, res, next) => {
+  initializeDatabase()
+    .then(() => next())
+    .catch((error) => {
+      console.error("DATABASE INITIALIZATION ERROR:", error.message);
+      res.status(503).json({
+        message: "Database is temporarily unavailable",
+      });
+    });
+});
+
 const PORT = process.env.PORT || 5000;
-
-// =====================================================
-// OTP STORAGE
-// =====================================================
-
-const otpStore = new Map();
-const verifiedEmails = new Set();
 
 // =====================================================
 // EMAIL TRANSPORTER
@@ -70,53 +100,68 @@ app.get("/", (req, res) => {
 
 app.post("/api/send-otp", async (req, res) => {
   try {
-    const { email } = req.body;
+    const email = req.body && req.body.email;
 
-    if (!email) {
+    if (typeof email !== "string" || !email.trim()) {
       return res.status(400).json({
-        message: "Email is required",
+        message: "A valid email is required",
       });
     }
 
     const emailKey = email.trim().toLowerCase();
+    const otp = crypto.randomInt(100000, 1000000).toString();
 
-    const otp = Math.floor(
-      100000 + Math.random() * 900000
-    ).toString();
+    db.query(
+      `INSERT INTO email_verifications
+       (email, otp, expires_at, verified)
+       VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE), 0)
+       ON DUPLICATE KEY UPDATE
+         otp = VALUES(otp),
+         expires_at = VALUES(expires_at),
+         verified = 0`,
+      [emailKey, otp],
+      async (dbError) => {
+        if (dbError) {
+          console.error("SAVE OTP ERROR:", dbError.message);
+          return res.status(500).json({
+            message: "Could not create email verification",
+          });
+        }
 
-    otpStore.set(emailKey, {
-      otp,
-      expiresAt: Date.now() + 5 * 60 * 1000,
-    });
+        try {
+          const otpHtml = [
+            '<div style="font-family: Arial, sans-serif; padding: 20px;">',
+            "<h2>Retail Inventory</h2>",
+            "<p>Your email verification OTP is:</p>",
+            '<h1 style="letter-spacing: 8px;">' + otp + "</h1>",
+            "<p>This OTP will expire in 5 minutes.</p>",
+            "<p>If you did not request this OTP, please ignore this email.</p>",
+            "</div>",
+          ].join("");
 
-    const otpHtml = [
-      '<div style="font-family: Arial, sans-serif; padding: 20px;">',
-      "<h2>Retail Inventory</h2>",
-      "<p>Your email verification OTP is:</p>",
-      '<h1 style="letter-spacing: 8px;">' + otp + "</h1>",
-      "<p>This OTP will expire in 5 minutes.</p>",
-      "<p>If you did not request this OTP, please ignore this email.</p>",
-      "</div>",
-    ].join("");
+          await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: emailKey,
+            subject: "Retail Inventory - Email Verification OTP",
+            html: otpHtml,
+          });
 
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: emailKey,
-      subject: "Retail Inventory - Email Verification OTP",
-      html: otpHtml,
-    });
-
-    console.log("OTP SENT TO:", emailKey);
-
-    res.json({
-      message: "OTP sent successfully",
-    });
+          console.log("OTP SENT TO:", emailKey);
+          return res.json({
+            message: "OTP sent successfully",
+          });
+        } catch (mailError) {
+          console.error("SEND OTP EMAIL ERROR:", mailError.message);
+          return res.status(500).json({
+            message: "Failed to send OTP email",
+          });
+        }
+      }
+    );
   } catch (error) {
-    console.error("SEND OTP ERROR:", error);
-
-    res.status(500).json({
+    console.error("SEND OTP ERROR:", error.message);
+    return res.status(500).json({
       message: "Failed to send OTP",
-      error: error.message,
     });
   }
 });
@@ -126,46 +171,71 @@ app.post("/api/send-otp", async (req, res) => {
 // =====================================================
 
 app.post("/api/verify-otp", (req, res) => {
-  const { email, otp } = req.body;
+  const { email, otp } = req.body || {};
 
-  if (!email || !otp) {
+  if (
+    typeof email !== "string" ||
+    !email.trim() ||
+    otp === undefined ||
+    otp === null
+  ) {
     return res.status(400).json({
       message: "Email and OTP are required",
     });
   }
 
   const emailKey = email.trim().toLowerCase();
+  const submittedOtp = String(otp).trim();
 
-  const storedData = otpStore.get(emailKey);
+  db.query(
+    `SELECT otp
+     FROM email_verifications
+     WHERE email = ? AND verified = 0 AND expires_at > NOW()`,
+    [emailKey],
+    (err, rows) => {
+      if (err) {
+        console.error("VERIFY OTP DATABASE ERROR:", err.message);
+        return res.status(500).json({
+          message: "Could not verify OTP",
+        });
+      }
 
-  if (!storedData) {
-    return res.status(400).json({
-      message: "OTP not found or expired",
-    });
-  }
+      if (!rows || rows.length === 0) {
+        return res.status(400).json({
+          message: "OTP not found or expired",
+        });
+      }
 
-  if (Date.now() > storedData.expiresAt) {
-    otpStore.delete(emailKey);
+      if (rows[0].otp !== submittedOtp) {
+        return res.status(400).json({
+          message: "Invalid OTP",
+        });
+      }
 
-    return res.status(400).json({
-      message: "OTP has expired",
-    });
-  }
+      db.query(
+        `UPDATE email_verifications
+         SET verified = 1, otp = NULL
+         WHERE email = ?`,
+        [emailKey],
+        (updateError) => {
+          if (updateError) {
+            console.error(
+              "MARK EMAIL VERIFIED ERROR:",
+              updateError.message
+            );
+            return res.status(500).json({
+              message: "Could not complete email verification",
+            });
+          }
 
-  if (storedData.otp !== otp.toString().trim()) {
-    return res.status(400).json({
-      message: "Invalid OTP",
-    });
-  }
-
-  otpStore.delete(emailKey);
-  verifiedEmails.add(emailKey);
-
-  console.log("EMAIL VERIFIED:", emailKey);
-
-  res.json({
-    message: "Email verified successfully",
-  });
+          console.log("EMAIL VERIFIED:", emailKey);
+          return res.json({
+            message: "Email verified successfully",
+          });
+        }
+      );
+    }
+  );
 });
 
 // =====================================================
@@ -173,14 +243,18 @@ app.post("/api/verify-otp", (req, res) => {
 // =====================================================
 
 app.post("/api/register", (req, res) => {
-  const {
-    name,
-    email,
-    mobile,
-    password,
-  } = req.body;
+  const { name, email, mobile, password } = req.body || {};
 
-  if (!name || !email || !mobile || !password) {
+  if (
+    typeof name !== "string" ||
+    typeof email !== "string" ||
+    typeof mobile !== "string" ||
+    typeof password !== "string" ||
+    !name.trim() ||
+    !email.trim() ||
+    !mobile.trim() ||
+    !password
+  ) {
     return res.status(400).json({
       message: "All fields are required",
     });
@@ -194,70 +268,70 @@ app.post("/api/register", (req, res) => {
 
   const emailKey = email.trim().toLowerCase();
 
-  if (!verifiedEmails.has(emailKey)) {
-    return res.status(400).json({
-      message: "Please verify your email first",
-    });
-  }
-
   db.query(
-    "SELECT id FROM users WHERE email = ?",
+    "SELECT email FROM email_verifications WHERE email = ? AND verified = 1",
     [emailKey],
-    (err, results) => {
-      if (err) {
-        console.error("CHECK USER ERROR:", err);
-
+    (verifyError, verificationRows) => {
+      if (verifyError) {
+        console.error(
+          "CHECK EMAIL VERIFICATION ERROR:",
+          verifyError.message
+        );
         return res.status(500).json({
-          message: "Database error while checking user",
-          error: err.message,
+          message: "Could not verify registration status",
         });
       }
 
-      if (results.length > 0) {
-        return res.status(409).json({
-          message:
-            "An account with this email already exists",
+      if (!verificationRows || verificationRows.length === 0) {
+        return res.status(400).json({
+          message: "Please verify your email first",
         });
       }
-
-      const sql =
-        "INSERT INTO users (name, email, mobile, password, role) VALUES (?, ?, ?, ?, ?)";
 
       db.query(
-        sql,
-        [
-          name.trim(),
-          emailKey,
-          mobile.trim(),
-          password,
-          "user",
-        ],
-        (insertErr, result) => {
-          if (insertErr) {
-            console.error(
-              "REGISTER ERROR:",
-              insertErr
-            );
-
+        "SELECT id FROM users WHERE email = ?",
+        [emailKey],
+        (err, results) => {
+          if (err) {
+            console.error("CHECK USER ERROR:", err.message);
             return res.status(500).json({
-              message: "Account could not be created",
-              error: insertErr.message,
-              code: insertErr.code,
-              sqlMessage: insertErr.sqlMessage,
+              message: "Database error while checking user",
             });
           }
 
-          verifiedEmails.delete(emailKey);
+          if (results.length > 0) {
+            return res.status(409).json({
+              message: "An account with this email already exists",
+            });
+          }
 
-          console.log(
-            "USER REGISTERED:",
-            result.insertId
+          const sql =
+            "INSERT INTO users (name, email, mobile, password, role) VALUES (?, ?, ?, ?, ?)";
+
+          db.query(
+            sql,
+            [name.trim(), emailKey, mobile.trim(), password, "user"],
+            (insertErr, result) => {
+              if (insertErr) {
+                console.error("REGISTER ERROR:", insertErr.message);
+                return res.status(500).json({
+                  message: "Account could not be created",
+                });
+              }
+
+              db.query(
+                "DELETE FROM email_verifications WHERE email = ?",
+                [emailKey],
+                () => {}
+              );
+
+              console.log("USER REGISTERED:", result.insertId);
+              return res.status(201).json({
+                message: "Account created successfully",
+                userId: result.insertId,
+              });
+            }
           );
-
-          return res.status(201).json({
-            message: "Account created successfully",
-            userId: result.insertId,
-          });
         }
       );
     }
@@ -282,13 +356,10 @@ function authenticateToken(req, res, next) {
 
   jwt.verify(
     token,
-    process.env.JWT_SECRET || "retail_inventory_jwt_secret_key",
+    process.env.JWT_SECRET,
     (err, user) => {
       if (err) {
-        console.error(
-          "JWT ERROR:",
-          err.message
-        );
+        console.error("JWT ERROR:", err.message);
 
         return res.status(403).json({
           message: "Invalid or expired token",
@@ -296,7 +367,6 @@ function authenticateToken(req, res, next) {
       }
 
       req.user = user;
-
       next();
     }
   );
@@ -307,10 +377,7 @@ function authenticateToken(req, res, next) {
 // =====================================================
 
 function requireAdmin(req, res, next) {
-  if (
-    !req.user ||
-    req.user.role !== "admin"
-  ) {
+  if (!req.user || req.user.role !== "admin") {
     return res.status(403).json({
       message: "Admin access required",
     });
@@ -324,10 +391,7 @@ function requireAdmin(req, res, next) {
 // =====================================================
 
 function requireUser(req, res, next) {
-  if (
-    !req.user ||
-    req.user.role !== "user"
-  ) {
+  if (!req.user || req.user.role !== "user") {
     return res.status(403).json({
       message: "User access required",
     });
@@ -341,10 +405,7 @@ function requireUser(req, res, next) {
 // =====================================================
 
 app.post("/api/login", (req, res) => {
-  const {
-    email,
-    password,
-  } = req.body;
+  const { email, password } = req.body || {};
 
   if (!email || !password) {
     return res.status(400).json({
@@ -388,7 +449,7 @@ app.post("/api/login", (req, res) => {
           email: user.email,
           role: user.role,
         },
-        process.env.JWT_SECRET || "retail_inventory_jwt_secret_key",
+        process.env.JWT_SECRET,
         {
           expiresIn: "1d",
         }
@@ -396,9 +457,7 @@ app.post("/api/login", (req, res) => {
 
       res.json({
         message: "Login successful",
-
         token,
-
         user: {
           id: user.id,
           name: user.name,
@@ -421,19 +480,27 @@ app.get(
   (req, res) => {
     db.query(
       `
-        SELECT
-          u.id,
-          u.name,
-          u.email,
-          u.mobile,
-          u.role,
-          COUNT(o.id) AS total_orders,
-          COALESCE(SUM(CASE WHEN o.payment_status != 'Failed' THEN COALESCE(o.total, o.amount, 0) ELSE 0 END), 0) AS total_spent,
-          MAX(o.created_at) AS latest_order_date
-        FROM users u
-        LEFT JOIN orders o ON u.id = o.user_id
-        GROUP BY u.id, u.name, u.email, u.mobile, u.role
-        ORDER BY total_orders DESC, u.id DESC
+      SELECT
+        u.id,
+        u.name,
+        u.email,
+        u.mobile,
+        u.role,
+        COUNT(o.id) AS total_orders,
+        COALESCE(
+          SUM(
+            CASE
+              WHEN o.payment_status != 'Failed'
+              THEN COALESCE(o.total, o.amount, 0)
+              ELSE 0
+            END
+          ), 0
+        ) AS total_spent,
+        MAX(o.created_at) AS latest_order_date
+      FROM users u
+      LEFT JOIN orders o ON u.id = o.user_id
+      GROUP BY u.id, u.name, u.email, u.mobile, u.role
+      ORDER BY total_orders DESC, u.id DESC
       `,
       (err, results) => {
         if (err) {
@@ -449,7 +516,10 @@ app.get(
   }
 );
 
-// Fetch all orders for a specific customer with product and customer details
+// =====================================================
+// CUSTOMER ORDERS
+// =====================================================
+
 app.get(
   "/api/customers/:id/orders",
   authenticateToken,
@@ -457,28 +527,28 @@ app.get(
   (req, res) => {
     db.query(
       `
-        SELECT
-          o.id,
-          o.user_id,
-          o.product_id,
-          o.quantity,
-          COALESCE(o.amount, o.total, 0) AS amount,
-          COALESCE(o.price, p.price, 0) AS price,
-          COALESCE(o.order_status, o.status, 'Processing') AS order_status,
-          COALESCE(o.payment_status, 'Pending') AS payment_status,
-          COALESCE(o.current_location, 'Warehouse') AS current_location,
-          o.created_at,
-          COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
-          p.image AS product_image,
-          p.category AS product_category,
-          u.name AS user_name,
-          u.email AS user_email,
-          u.mobile AS user_mobile
-        FROM orders o
-        LEFT JOIN products p ON o.product_id = p.id
-        LEFT JOIN users u ON o.user_id = u.id
-        WHERE o.user_id = ?
-        ORDER BY o.id DESC
+      SELECT
+        o.id,
+        o.user_id,
+        o.product_id,
+        o.quantity,
+        COALESCE(o.amount, o.total, 0) AS amount,
+        COALESCE(o.price, p.price, 0) AS price,
+        COALESCE(o.order_status, o.status, 'Processing') AS order_status,
+        COALESCE(o.payment_status, 'Pending') AS payment_status,
+        COALESCE(o.current_location, 'Warehouse') AS current_location,
+        o.created_at,
+        COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
+        p.image AS product_image,
+        p.category AS product_category,
+        u.name AS user_name,
+        u.email AS user_email,
+        u.mobile AS user_mobile
+      FROM orders o
+      LEFT JOIN products p ON o.product_id = p.id
+      LEFT JOIN users u ON o.user_id = u.id
+      WHERE o.user_id = ?
+      ORDER BY o.id DESC
       `,
       [req.params.id],
       (err, results) => {
@@ -489,6 +559,7 @@ app.get(
             error: err.message,
           });
         }
+
         res.json(results);
       }
     );
@@ -499,15 +570,13 @@ app.get(
 // IMAGE UPLOAD
 // =====================================================
 
-const uploadDir = path.join(
-  __dirname,
-  "uploads"
-);
+// Vercel allows temporary writes in /tmp.
+// Uploaded files here are NOT permanently stored.
+
+const uploadDir = path.join("/tmp", "retail-uploads");
 
 if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, {
-    recursive: true,
-  });
+  fs.mkdirSync(uploadDir, { recursive: true });
 }
 
 const storage = multer.diskStorage({
@@ -545,16 +614,13 @@ app.get(
   (req, res) => {
     db.query(
       `
-        SELECT *
-        FROM products
-        ORDER BY id DESC
+      SELECT *
+      FROM products
+      ORDER BY id DESC
       `,
       (err, results) => {
         if (err) {
-          console.error(
-            "GET PRODUCTS ERROR:",
-            err
-          );
+          console.error("GET PRODUCTS ERROR:", err);
 
           return res.status(500).json({
             message: "Failed to fetch products",
@@ -588,8 +654,7 @@ app.post(
 
     if (!name || !price) {
       return res.status(400).json({
-        message:
-          "Product name and price are required",
+        message: "Product name and price are required",
       });
     }
 
@@ -603,13 +668,7 @@ app.post(
 
     const sql = `
       INSERT INTO products
-      (
-        name,
-        category,
-        price,
-        stock,
-        image
-      )
+      (name, category, price, stock, image)
       VALUES (?, ?, ?, ?, ?)
     `;
 
@@ -624,32 +683,29 @@ app.post(
       ],
       (err, result) => {
         if (err) {
-          console.error(
-            "CREATE PRODUCT ERROR:",
-            err
-          );
+          console.error("CREATE PRODUCT ERROR:", err);
 
           return res.status(500).json({
-            message:
-              "Failed to create product",
+            message: "Failed to create product",
             error: err.message,
           });
         }
 
         const newProductId = result.insertId;
 
-        // Synchronize inventory table
         db.query(
-          `INSERT INTO inventory (product_id, quantity, min_stock, updated_at) 
-           VALUES (?, ?, 10, NOW()) 
-           ON DUPLICATE KEY UPDATE quantity = VALUES(quantity), updated_at = NOW()`,
+          `INSERT INTO inventory
+           (product_id, quantity, min_stock, updated_at)
+           VALUES (?, ?, 10, NOW())
+           ON DUPLICATE KEY UPDATE
+           quantity = VALUES(quantity),
+           updated_at = NOW()`,
           [newProductId, finalStock],
           () => {}
         );
 
         res.status(201).json({
-          message:
-            "Product created successfully",
+          message: "Product created successfully",
           productId: newProductId,
         });
       }
@@ -685,8 +741,7 @@ app.put(
     let values;
 
     if (req.file) {
-      const image =
-        `/uploads/${req.file.filename}`;
+      const image = `/uploads/${req.file.filename}`;
 
       sql = `
         UPDATE products
@@ -727,38 +782,31 @@ app.put(
       ];
     }
 
-    db.query(
-      sql,
-      values,
-      (err) => {
-        if (err) {
-          console.error(
-            "UPDATE PRODUCT ERROR:",
-            err
-          );
+    db.query(sql, values, (err) => {
+      if (err) {
+        console.error("UPDATE PRODUCT ERROR:", err);
 
-          return res.status(500).json({
-            message:
-              "Failed to update product",
-            error: err.message,
-          });
-        }
-
-        // Synchronize inventory table
-        db.query(
-          `INSERT INTO inventory (product_id, quantity, min_stock, updated_at) 
-           VALUES (?, ?, 10, NOW()) 
-           ON DUPLICATE KEY UPDATE quantity = VALUES(quantity), updated_at = NOW()`,
-          [productId, finalStock],
-          () => {}
-        );
-
-        res.json({
-          message:
-            "Product updated successfully",
+        return res.status(500).json({
+          message: "Failed to update product",
+          error: err.message,
         });
       }
-    );
+
+      db.query(
+        `INSERT INTO inventory
+         (product_id, quantity, min_stock, updated_at)
+         VALUES (?, ?, 10, NOW())
+         ON DUPLICATE KEY UPDATE
+         quantity = VALUES(quantity),
+         updated_at = NOW()`,
+        [productId, finalStock],
+        () => {}
+      );
+
+      res.json({
+        message: "Product updated successfully",
+      });
+    });
   }
 );
 
@@ -773,13 +821,13 @@ app.delete(
   (req, res) => {
     const productId = req.params.id;
 
-    // 1. Check if product is referenced in historical orders
     db.query(
       "SELECT COUNT(*) AS orderCount FROM orders WHERE product_id = ?",
       [productId],
       (chkErr, chkRows) => {
         if (chkErr) {
           console.error("CHECK PRODUCT ORDERS ERROR:", chkErr);
+
           return res.status(500).json({
             message: "Failed to check product order history",
             error: chkErr.message,
@@ -787,44 +835,47 @@ app.delete(
         }
 
         const orderCount = chkRows[0]?.orderCount || 0;
+
         if (orderCount > 0) {
           return res.status(400).json({
-            message: `Cannot delete product because it is linked to ${orderCount} customer order(s). To preserve order records and accounting history, please set its stock to 0 or mark it out of stock instead.`,
+            message:
+              `Cannot delete product because it is linked to ${orderCount} customer order(s). Please set its stock to 0 or mark it out of stock instead.`,
             orderCount,
           });
         }
 
-        // 2. Remove inventory record first to satisfy foreign key constraint
-        db.query("DELETE FROM inventory WHERE product_id = ?", [productId], (invErr) => {
-          if (invErr) {
-            console.error("DELETE INVENTORY ON PRODUCT REMOVE ERROR:", invErr);
-          }
-
-          // 3. Delete product record
-          db.query(
-            "DELETE FROM products WHERE id = ?",
-            [productId],
-            (err) => {
-              if (err) {
-                console.error(
-                  "DELETE PRODUCT ERROR:",
-                  err
-                );
-
-                return res.status(500).json({
-                  message:
-                    "Failed to delete product",
-                  error: err.message,
-                });
-              }
-
-              res.json({
-                message:
-                  "Product deleted successfully",
+        db.query(
+          "DELETE FROM inventory WHERE product_id = ?",
+          [productId],
+          (invErr) => {
+            if (invErr) {
+              console.error("DELETE INVENTORY ERROR:", invErr);
+              return res.status(500).json({
+                message: "Failed to delete inventory record",
+                error: invErr.message,
               });
             }
-          );
-        });
+
+            db.query(
+              "DELETE FROM products WHERE id = ?",
+              [productId],
+              (err) => {
+                if (err) {
+                  console.error("DELETE PRODUCT ERROR:", err);
+
+                  return res.status(500).json({
+                    message: "Failed to delete product",
+                    error: err.message,
+                  });
+                }
+
+                res.json({
+                  message: "Product deleted successfully",
+                });
+              }
+            );
+          }
+        );
       }
     );
   }
@@ -840,23 +891,24 @@ app.get(
   (req, res) => {
     db.query(
       `
-        SELECT 
-          c.id,
-          c.name,
-          COALESCE(c.description, '') AS description,
-          COUNT(p.id) AS product_count,
-          COALESCE(SUM(p.stock), 0) AS total_stock
-        FROM categories c
-        LEFT JOIN products p ON LOWER(TRIM(c.name)) = LOWER(TRIM(p.category))
-        GROUP BY c.id, c.name, c.description
-        ORDER BY c.name ASC
+      SELECT
+        c.id,
+        c.name,
+        COALESCE(c.description, '') AS description,
+        COUNT(p.id) AS product_count,
+        COALESCE(SUM(p.stock), 0) AS total_stock
+      FROM categories c
+      LEFT JOIN products p
+        ON LOWER(TRIM(c.name)) = LOWER(TRIM(p.category))
+      GROUP BY c.id, c.name, c.description
+      ORDER BY c.name ASC
       `,
       (err, results) => {
         if (err) {
           console.error("GET CATEGORIES ERROR:", err);
+
           return res.status(500).json({
-            message:
-              "Failed to fetch categories",
+            message: "Failed to fetch categories",
             error: err.message,
           });
         }
@@ -876,42 +928,31 @@ app.post(
   authenticateToken,
   requireAdmin,
   (req, res) => {
-    const {
-      name,
-      description,
-    } = req.body;
+    const { name, description } = req.body;
 
     if (!name) {
       return res.status(400).json({
-        message:
-          "Category name is required",
+        message: "Category name is required",
       });
     }
 
     db.query(
       `
-        INSERT INTO categories
-        (name, description)
-        VALUES (?, ?)
+      INSERT INTO categories (name, description)
+      VALUES (?, ?)
       `,
-      [
-        name,
-        description || "",
-      ],
+      [name, description || ""],
       (err, result) => {
         if (err) {
           return res.status(500).json({
-            message:
-              "Failed to create category",
+            message: "Failed to create category",
             error: err.message,
           });
         }
 
         res.status(201).json({
-          message:
-            "Category created successfully",
-          categoryId:
-            result.insertId,
+          message: "Category created successfully",
+          categoryId: result.insertId,
         });
       }
     );
@@ -928,10 +969,7 @@ app.put(
   requireAdmin,
   (req, res) => {
     const categoryId = req.params.id;
-    const {
-      name,
-      description,
-    } = req.body;
+    const { name, description } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({
@@ -942,7 +980,6 @@ app.put(
     const newName = name.trim();
     const newDesc = description ? description.trim() : "";
 
-    // 1. Fetch current category name to detect rename
     db.query(
       "SELECT name FROM categories WHERE id = ?",
       [categoryId],
@@ -962,45 +999,40 @@ app.put(
 
         const oldName = rows[0].name;
 
-        // 2. Update category record
         db.query(
           `
-            UPDATE categories
-            SET
-              name = ?,
-              description = ?
-            WHERE id = ?
+          UPDATE categories
+          SET name = ?, description = ?
+          WHERE id = ?
           `,
-          [
-            newName,
-            newDesc,
-            categoryId,
-          ],
+          [newName, newDesc, categoryId],
           (updateErr) => {
             if (updateErr) {
               return res.status(500).json({
-                message:
-                  "Failed to update category",
+                message: "Failed to update category",
                 error: updateErr.message,
               });
             }
 
-            // 3. If category name changed, cascade update to existing products
             if (oldName.toLowerCase() !== newName.toLowerCase()) {
               db.query(
-                "UPDATE products SET category = ? WHERE LOWER(TRIM(category)) = LOWER(TRIM(?))",
+                `UPDATE products
+                 SET category = ?
+                 WHERE LOWER(TRIM(category)) = LOWER(TRIM(?))`,
                 [newName, oldName],
                 (prodUpdErr) => {
                   if (prodUpdErr) {
-                    console.error("CASCADE CATEGORY UPDATE TO PRODUCTS ERROR:", prodUpdErr);
+                    console.error(
+                      "CASCADE CATEGORY UPDATE ERROR:",
+                      prodUpdErr
+                    );
                   }
                 }
               );
             }
 
             res.json({
-              message:
-                "Category updated successfully",
+              message: "Category updated successfully",
             });
           }
         );
@@ -1020,7 +1052,6 @@ app.delete(
   (req, res) => {
     const categoryId = req.params.id;
 
-    // 1. Find category name
     db.query(
       "SELECT name FROM categories WHERE id = ?",
       [categoryId],
@@ -1040,9 +1071,10 @@ app.delete(
 
         const catName = rows[0].name;
 
-        // 2. Check if products are currently using this category
         db.query(
-          "SELECT COUNT(*) AS count FROM products WHERE LOWER(TRIM(category)) = LOWER(TRIM(?))",
+          `SELECT COUNT(*) AS count
+           FROM products
+           WHERE LOWER(TRIM(category)) = LOWER(TRIM(?))`,
           [catName],
           (chkErr, chkRows) => {
             if (chkErr) {
@@ -1053,29 +1085,28 @@ app.delete(
             }
 
             const count = chkRows[0]?.count || 0;
+
             if (count > 0) {
               return res.status(400).json({
-                message: `Cannot delete category "${catName}" because it currently has ${count} associated product(s). Please reassign or delete these products first to prevent orphaned records.`,
+                message:
+                  `Cannot delete category "${catName}" because it currently has ${count} associated product(s). Reassign or delete these products first.`,
                 productCount: count,
               });
             }
 
-            // 3. Delete category
             db.query(
               "DELETE FROM categories WHERE id = ?",
               [categoryId],
               (err) => {
                 if (err) {
                   return res.status(500).json({
-                    message:
-                      "Failed to delete category",
+                    message: "Failed to delete category",
                     error: err.message,
                   });
                 }
 
                 res.json({
-                  message:
-                    "Category deleted successfully",
+                  message: "Category deleted successfully",
                 });
               }
             );
@@ -1096,33 +1127,29 @@ app.get(
   (req, res) => {
     db.query(
       `
-        SELECT
-          p.id,
-          p.name,
-          p.id AS product_id,
-          p.name AS product_name,
-          p.category,
-          p.price,
-          p.stock,
-          p.image,
-          i.id AS inventory_id,
-          p.stock AS quantity,
-          COALESCE(i.min_stock, 10) AS min_stock,
-          i.updated_at
-        FROM products p
-        LEFT JOIN inventory i ON p.id = i.product_id
-        ORDER BY p.id DESC
+      SELECT
+        p.id,
+        p.name,
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        p.price,
+        p.stock,
+        p.image,
+        i.id AS inventory_id,
+        p.stock AS quantity,
+        COALESCE(i.min_stock, 10) AS min_stock,
+        i.updated_at
+      FROM products p
+      LEFT JOIN inventory i ON p.id = i.product_id
+      ORDER BY p.id DESC
       `,
       (err, results) => {
         if (err) {
-          console.error(
-            "GET INVENTORY ERROR:",
-            err
-          );
+          console.error("GET INVENTORY ERROR:", err);
 
           return res.status(500).json({
-            message:
-              "Failed to fetch inventory",
+            message: "Failed to fetch inventory",
             error: err.message,
           });
         }
@@ -1149,59 +1176,63 @@ app.post(
       min_stock,
     } = req.body;
 
-    if (
-      !product_id ||
-      quantity === undefined
-    ) {
+    if (!product_id || quantity === undefined) {
       return res.status(400).json({
-        message:
-          "Product and quantity are required",
+        message: "Product and quantity are required",
       });
     }
 
     const qty = Math.max(0, parseInt(quantity, 10) || 0);
-    const minStk = min_stock !== undefined ? Math.max(0, parseInt(min_stock, 10) || 0) : 10;
-
-    // Sync products table stock as well
-    db.query("UPDATE products SET stock = ? WHERE id = ?", [qty, product_id], () => {});
+    const minStk =
+      min_stock !== undefined
+        ? Math.max(0, parseInt(min_stock, 10) || 0)
+        : 10;
 
     db.query(
-      `
-        INSERT INTO inventory
-        (
-          product_id,
-          warehouse_id,
-          quantity,
-          min_stock
-        )
-        VALUES (?, ?, ?, ?)
-      `,
-      [
-        product_id,
-        warehouse_id || null,
-        qty,
-        minStk,
-      ],
-      (err, result) => {
-        if (err) {
-          console.error(
-            "CREATE INVENTORY ERROR:",
-            err
-          );
-
+      "UPDATE products SET stock = ? WHERE id = ?",
+      [qty, product_id],
+      (productError, productResult) => {
+        if (productError) {
           return res.status(500).json({
-            message:
-              "Failed to create inventory",
-            error: err.message,
+            message: "Failed to update product stock",
+            error: productError.message,
           });
         }
 
-        res.status(201).json({
-          message:
-            "Inventory created successfully",
-          inventoryId:
-            result.insertId,
-        });
+        if (productResult.affectedRows === 0) {
+          return res.status(404).json({
+            message: "Product not found",
+          });
+        }
+
+        db.query(
+          `
+          INSERT INTO inventory
+          (product_id, warehouse_id, quantity, min_stock)
+          VALUES (?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            warehouse_id = VALUES(warehouse_id),
+            quantity = VALUES(quantity),
+            min_stock = VALUES(min_stock),
+            updated_at = NOW()
+          `,
+          [product_id, warehouse_id || null, qty, minStk],
+          (err, result) => {
+            if (err) {
+              console.error("CREATE INVENTORY ERROR:", err);
+
+              return res.status(500).json({
+                message: "Failed to create inventory",
+                error: err.message,
+              });
+            }
+
+            res.status(201).json({
+              message: "Inventory saved successfully",
+              inventoryId: result.insertId || null,
+            });
+          }
+        );
       }
     );
   }
@@ -1218,35 +1249,67 @@ app.put(
   (req, res) => {
     const { quantity, min_stock } = req.body;
     const invId = req.params.id;
+
     const newQty = Math.max(0, parseInt(quantity, 10) || 0);
-    const minStk = min_stock !== undefined ? Math.max(0, parseInt(min_stock, 10) || 0) : 10;
+    const minStk =
+      min_stock !== undefined
+        ? Math.max(0, parseInt(min_stock, 10) || 0)
+        : 10;
 
-    db.query("SELECT product_id FROM inventory WHERE id = ?", [invId], (err, rows) => {
-      if (!err && rows && rows.length > 0) {
-        db.query("UPDATE products SET stock = ? WHERE id = ?", [newQty, rows[0].product_id], () => {});
-      }
-
-      db.query(
-        `
-          UPDATE inventory
-          SET quantity = ?, min_stock = ?, updated_at = NOW()
-          WHERE id = ?
-        `,
-        [newQty, minStk, invId],
-        (updateErr) => {
-          if (updateErr) {
-            return res.status(500).json({
-              message: "Failed to update inventory",
-              error: updateErr.message,
-            });
-          }
-
-          res.json({
-            message: "Inventory updated successfully",
+    db.query(
+      "SELECT product_id FROM inventory WHERE id = ?",
+      [invId],
+      (err, rows) => {
+        if (err) {
+          return res.status(500).json({
+            message: "Failed to find inventory",
+            error: err.message,
           });
         }
-      );
-    });
+
+        if (!rows || rows.length === 0) {
+          return res.status(404).json({
+            message: "Inventory record not found",
+          });
+        }
+
+        const productId = rows[0].product_id;
+
+        db.query(
+          "UPDATE products SET stock = ? WHERE id = ?",
+          [newQty, productId],
+          (productError) => {
+            if (productError) {
+              return res.status(500).json({
+                message: "Failed to update product stock",
+                error: productError.message,
+              });
+            }
+
+            db.query(
+              `
+              UPDATE inventory
+              SET quantity = ?, min_stock = ?, updated_at = NOW()
+              WHERE id = ?
+              `,
+              [newQty, minStk, invId],
+              (updateErr) => {
+                if (updateErr) {
+                  return res.status(500).json({
+                    message: "Failed to update inventory",
+                    error: updateErr.message,
+                  });
+                }
+
+                res.json({
+                  message: "Inventory updated successfully",
+                });
+              }
+            );
+          }
+        );
+      }
+    );
   }
 );
 
@@ -1261,50 +1324,61 @@ app.put(
   (req, res) => {
     const productId = req.params.productId;
     const { stock, min_stock } = req.body;
+
     const newStock = Math.max(0, parseInt(stock, 10) || 0);
-    const minStk = min_stock !== undefined ? Math.max(0, parseInt(min_stock, 10) || 0) : 10;
+    const minStk =
+      min_stock !== undefined
+        ? Math.max(0, parseInt(min_stock, 10) || 0)
+        : 10;
 
-    // Update product stock
-    db.query("UPDATE products SET stock = ? WHERE id = ?", [newStock, productId], (pErr) => {
-      if (pErr) {
-        console.error("PRODUCT STOCK UPDATE ERROR:", pErr);
-        return res.status(500).json({
-          message: "Failed to update product stock",
-          error: pErr.message,
-        });
-      }
+    db.query(
+      "UPDATE products SET stock = ? WHERE id = ?",
+      [newStock, productId],
+      (pErr, productResult) => {
+        if (pErr) {
+          console.error("PRODUCT STOCK UPDATE ERROR:", pErr);
 
-      // Check if inventory row exists
-      db.query("SELECT id FROM inventory WHERE product_id = ?", [productId], (iErr, rows) => {
-        if (!iErr && rows && rows.length > 0) {
-          db.query(
-            "UPDATE inventory SET quantity = ?, min_stock = ?, updated_at = NOW() WHERE product_id = ?",
-            [newStock, minStk, productId],
-            () => {
-              res.json({
-                message: "Stock updated successfully",
-                productId,
-                stock: newStock,
-                min_stock: minStk,
-              });
-            }
-          );
-        } else {
-          db.query(
-            "INSERT INTO inventory (product_id, quantity, min_stock, updated_at) VALUES (?, ?, ?, NOW())",
-            [productId, newStock, minStk],
-            () => {
-              res.json({
-                message: "Stock updated successfully",
-                productId,
-                stock: newStock,
-                min_stock: minStk,
-              });
-            }
-          );
+          return res.status(500).json({
+            message: "Failed to update product stock",
+            error: pErr.message,
+          });
         }
-      });
-    });
+
+        if (productResult.affectedRows === 0) {
+          return res.status(404).json({
+            message: "Product not found",
+          });
+        }
+
+        db.query(
+          `
+          INSERT INTO inventory
+          (product_id, quantity, min_stock, updated_at)
+          VALUES (?, ?, ?, NOW())
+          ON DUPLICATE KEY UPDATE
+            quantity = VALUES(quantity),
+            min_stock = VALUES(min_stock),
+            updated_at = NOW()
+          `,
+          [productId, newStock, minStk],
+          (iErr) => {
+            if (iErr) {
+              return res.status(500).json({
+                message: "Failed to update inventory",
+                error: iErr.message,
+              });
+            }
+
+            res.json({
+              message: "Stock updated successfully",
+              productId,
+              stock: newStock,
+              min_stock: minStk,
+            });
+          }
+        );
+      }
+    );
   }
 );
 
@@ -1323,15 +1397,13 @@ app.delete(
       (err) => {
         if (err) {
           return res.status(500).json({
-            message:
-              "Failed to delete inventory",
+            message: "Failed to delete inventory",
             error: err.message,
           });
         }
 
         res.json({
-          message:
-            "Inventory deleted successfully",
+          message: "Inventory deleted successfully",
         });
       }
     );
@@ -1339,7 +1411,7 @@ app.delete(
 );
 
 // =====================================================
-// ORDERS TABLE SETUP
+// CREATE REQUIRED DATABASE TABLES
 // =====================================================
 
 function createRequiredTables(callback) {
@@ -1376,7 +1448,8 @@ function createRequiredTables(callback) {
       min_stock INT NOT NULL DEFAULT 10,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ON UPDATE CURRENT_TIMESTAMP,
-      FOREIGN KEY (product_id) REFERENCES products(id)
+      CONSTRAINT fk_inventory_product
+        FOREIGN KEY (product_id) REFERENCES products(id)
         ON DELETE CASCADE
     ) ENGINE=InnoDB`,
 
@@ -1393,16 +1466,25 @@ function createRequiredTables(callback) {
       status VARCHAR(50) DEFAULT 'Processing',
       current_location VARCHAR(255) DEFAULT 'Warehouse',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (product_id) REFERENCES products(id)
-    ) ENGINE=InnoDB`
+      CONSTRAINT fk_orders_user
+        FOREIGN KEY (user_id) REFERENCES users(id),
+      CONSTRAINT fk_orders_product
+        FOREIGN KEY (product_id) REFERENCES products(id)
+    ) ENGINE=InnoDB`,
+
+    `CREATE TABLE IF NOT EXISTS email_verifications (
+      email VARCHAR(255) PRIMARY KEY,
+      otp VARCHAR(6) DEFAULT NULL,
+      expires_at DATETIME NOT NULL,
+      verified TINYINT(1) NOT NULL DEFAULT 0
+    ) ENGINE=InnoDB`,
   ];
 
   let index = 0;
 
   function runNext() {
     if (index >= queries.length) {
-      console.log("All five database tables are ready.");
+      console.log("All six database tables are ready.");
       return callback(null);
     }
 
@@ -1420,169 +1502,117 @@ function createRequiredTables(callback) {
   runNext();
 }
 
+// =====================================================
+// ORDERS TABLE SETUP
+// =====================================================
 
 function setupOrdersTable(callback) {
   db.query(
     "SHOW COLUMNS FROM orders",
     (err, columns) => {
-
       if (err) {
-        console.error(
-          "ORDERS TABLE CHECK ERROR:",
-          err.message
-        );
-
+        console.error("ORDERS TABLE CHECK ERROR:", err.message);
         return callback(err);
       }
 
-      const names = columns.map(
-        (column) => column.Field
-      );
-
+      const names = columns.map((column) => column.Field);
       const queries = [];
-
-      // -------------------------------------------------
-      // STATUS
-      // -------------------------------------------------
 
       if (!names.includes("status")) {
         queries.push(`
           ALTER TABLE orders
-          ADD COLUMN status VARCHAR(50)
-          DEFAULT 'Processing'
-        `);
-      } else {
-        queries.push(`
-          ALTER TABLE orders
-          MODIFY COLUMN status VARCHAR(50)
-          DEFAULT 'Processing'
+          ADD COLUMN status VARCHAR(50) DEFAULT 'Processing'
         `);
       }
 
-      // -------------------------------------------------
-      // PAYMENT STATUS
-      // -------------------------------------------------
-
-      if (
-        !names.includes(
-          "payment_status"
-        )
-      ) {
+      if (!names.includes("payment_status")) {
         queries.push(`
           ALTER TABLE orders
-          ADD COLUMN payment_status VARCHAR(50)
-          DEFAULT 'Pending'
+          ADD COLUMN payment_status VARCHAR(50) DEFAULT 'Pending'
         `);
       }
 
-      // -------------------------------------------------
-      // CURRENT LOCATION
-      // -------------------------------------------------
-
-      if (
-        !names.includes(
-          "current_location"
-        )
-      ) {
+      if (!names.includes("current_location")) {
         queries.push(`
           ALTER TABLE orders
-          ADD COLUMN current_location VARCHAR(255)
-          DEFAULT 'Warehouse'
+          ADD COLUMN current_location VARCHAR(255) DEFAULT 'Warehouse'
         `);
       }
-
-      // -------------------------------------------------
-      // PRICE
-      // -------------------------------------------------
 
       if (!names.includes("price")) {
         queries.push(`
           ALTER TABLE orders
-          ADD COLUMN price DECIMAL(10,2)
-          DEFAULT 0
+          ADD COLUMN price DECIMAL(10,2) DEFAULT 0
         `);
       }
-
-      // -------------------------------------------------
-      // TOTAL
-      // -------------------------------------------------
 
       if (!names.includes("total")) {
         queries.push(`
           ALTER TABLE orders
-          ADD COLUMN total DECIMAL(10,2)
-          DEFAULT 0
+          ADD COLUMN total DECIMAL(10,2) DEFAULT 0
         `);
       }
 
-      // -------------------------------------------------
-      // RUN ALTER QUERIES
-      // -------------------------------------------------
-
       function runNext(index) {
-
         if (index >= queries.length) {
-          console.log(
-            "Orders table setup completed."
-          );
+          return setupCategoriesAndInventory();
+        }
 
-          // Safely check and add description column to categories if not exists
-          db.query("SHOW COLUMNS FROM categories", (catErr, catCols) => {
+        db.query(queries[index], (alterErr) => {
+          if (alterErr) {
+            console.error("ORDERS TABLE ALTER ERROR:", alterErr.message);
+            return callback(alterErr);
+          }
+
+          runNext(index + 1);
+        });
+      }
+
+      function setupCategoriesAndInventory() {
+        db.query(
+          "SHOW COLUMNS FROM categories",
+          (catErr, catCols) => {
+            if (catErr) return callback(catErr);
+
+            const catNames = catCols.map((c) => c.Field);
+
             const finishSetup = () => {
-              // Ensure inventory is synchronized with all products
               db.query(
-                `INSERT INTO inventory (product_id, quantity, min_stock, updated_at) 
-                 SELECT id, stock, 10, NOW() FROM products 
-                 ON DUPLICATE KEY UPDATE quantity = VALUES(quantity)`,
+                `
+                INSERT INTO inventory
+                (product_id, quantity, min_stock, updated_at)
+                SELECT id, stock, 10, NOW()
+                FROM products
+                ON DUPLICATE KEY UPDATE
+                  quantity = VALUES(quantity)
+                `,
                 (syncErr) => {
                   if (syncErr) {
-                    console.error("INVENTORY STARTUP SYNC ERROR:", syncErr.message);
-                  } else {
-                    console.log("Inventory and products records synchronized.");
+                    console.error(
+                      "INVENTORY STARTUP SYNC ERROR:",
+                      syncErr.message
+                    );
+                    return callback(syncErr);
                   }
-                  return callback(null);
+
+                  console.log("Inventory and products synchronized.");
+                  callback(null);
                 }
               );
             };
 
-            if (!catErr && catCols) {
-              const catNames = catCols.map((c) => c.Field);
-              if (!catNames.includes("description")) {
-                db.query(
-                  "ALTER TABLE categories ADD COLUMN description VARCHAR(255) DEFAULT ''",
-                  (altCatErr) => {
-                    if (altCatErr) {
-                      console.error("CATEGORIES ALTER ERROR:", altCatErr.message);
-                    } else {
-                      console.log("Categories description column added.");
-                    }
-                    return finishSetup();
-                  }
-                );
-                return;
-              }
-            }
-            return finishSetup();
-          });
-          return;
-        }
-
-        db.query(
-          queries[index],
-          (alterErr) => {
-
-            if (alterErr) {
-              console.error(
-                "ORDERS TABLE ALTER ERROR:",
-                alterErr.message
+            if (!catNames.includes("description")) {
+              db.query(
+                `ALTER TABLE categories
+                 ADD COLUMN description VARCHAR(255) DEFAULT ''`,
+                (altCatErr) => {
+                  if (altCatErr) return callback(altCatErr);
+                  finishSetup();
+                }
               );
-
-              return callback(
-                alterErr
-              );
+            } else {
+              finishSetup();
             }
-
-            runNext(index + 1);
           }
         );
       }
@@ -1596,11 +1626,7 @@ function setupOrdersTable(callback) {
 // CREATE ORDER - USER
 // =====================================================
 
-
-
-    // -------------------------------------------------
-    // VALIDATION
-  app.post(
+app.post(
   "/api/orders",
   authenticateToken,
   requireUser,
@@ -1610,7 +1636,7 @@ function setupOrdersTable(callback) {
       quantity,
       payment_status,
       order_status,
-    } = req.body;
+    } = req.body || {};
 
     product_id = Number(product_id);
     quantity = Number(quantity);
@@ -1627,25 +1653,21 @@ function setupOrdersTable(callback) {
       });
     }
 
-    // -------------------------------------------------
-    // START DATABASE TRANSACTION
-    // -------------------------------------------------
     db.beginTransaction((trxErr) => {
       if (trxErr) {
         console.error("TRANSACTION START ERROR:", trxErr);
+
         return res.status(500).json({
           message: "Could not initiate order transaction",
           error: trxErr.message,
         });
       }
 
-      // 1. Lock and lookup product
       db.query(
         "SELECT * FROM products WHERE id = ? FOR UPDATE",
         [product_id],
         (productErr, products) => {
           if (productErr) {
-            console.error("GET PRODUCT FOR ORDER ERROR:", productErr);
             return db.rollback(() => {
               res.status(500).json({
                 message: "Database error while finding product",
@@ -1663,19 +1685,9 @@ function setupOrdersTable(callback) {
           }
 
           const product = products[0];
-
-          // Robust stock detection across stock, Stock, quantity
-          const productStock = Number(
-            product.stock !== undefined
-              ? product.stock
-              : product.Stock !== undefined
-              ? product.Stock
-              : product.quantity || 0
-          );
-
+          const productStock = Number(product.stock || 0);
           const productPrice = Number(product.price || 0);
 
-          // 2. Strict stock check (do not bypass)
           if (productStock < quantity) {
             return db.rollback(() => {
               res.status(400).json({
@@ -1690,7 +1702,6 @@ function setupOrdersTable(callback) {
           const finalPaymentStatus = payment_status || "Pending";
           const finalOrderStatus = order_status || "Processing";
 
-          // 3. Insert Order with both amount and total to satisfy NOT NULL constraints
           const orderSql = `
             INSERT INTO orders
             (
@@ -1721,74 +1732,85 @@ function setupOrdersTable(callback) {
             "Warehouse",
           ];
 
-          db.query(orderSql, orderValues, (orderErr, orderResult) => {
-            if (orderErr) {
-              console.error("CREATE ORDER DATABASE ERROR:", orderErr);
-              return db.rollback(() => {
-                res.status(500).json({
-                  message: "Order could not be created",
-                  error: orderErr.message,
+          db.query(
+            orderSql,
+            orderValues,
+            (orderErr, orderResult) => {
+              if (orderErr) {
+                return db.rollback(() => {
+                  res.status(500).json({
+                    message: "Order could not be created",
+                    error: orderErr.message,
+                  });
                 });
-              });
-            }
+              }
 
-            const orderId = orderResult.insertId;
+              const orderId = orderResult.insertId;
 
-            // 4. Atomically deduct stock from products table
-            db.query(
-              `
+              db.query(
+                `
                 UPDATE products
                 SET stock = stock - ?
                 WHERE id = ? AND stock >= ?
-              `,
-              [quantity, product_id, quantity],
-              (updateErr, updateResult) => {
-                if (updateErr || updateResult.affectedRows === 0) {
-                  console.error("STOCK UPDATE ERROR:", updateErr);
-                  return db.rollback(() => {
-                    res.status(400).json({
-                      message: "Insufficient product stock",
-                      availableStock: productStock,
-                      requestedQuantity: quantity,
+                `,
+                [quantity, product_id, quantity],
+                (updateErr, updateResult) => {
+                  if (updateErr || updateResult.affectedRows === 0) {
+                    return db.rollback(() => {
+                      res.status(400).json({
+                        message: "Insufficient product stock",
+                        availableStock: productStock,
+                        requestedQuantity: quantity,
+                      });
                     });
-                  });
-                }
+                  }
 
-                // 5. Also sync inventory table if a record exists for this product
-                db.query(
-                  `
+                  db.query(
+                    `
                     UPDATE inventory
-                    SET quantity = GREATEST(0, quantity - ?)
+                    SET quantity = GREATEST(0, quantity - ?),
+                        updated_at = NOW()
                     WHERE product_id = ?
-                  `,
-                  [quantity, product_id],
-                  () => {
-                    // 6. Commit transaction
-                    db.commit((commitErr) => {
-                      if (commitErr) {
-                        console.error("COMMIT ERROR:", commitErr);
+                    `,
+                    [quantity, product_id],
+                    (inventoryErr) => {
+                      if (inventoryErr) {
                         return db.rollback(() => {
                           res.status(500).json({
-                            message: "Transaction commit failed",
-                            error: commitErr.message,
+                            message: "Inventory update failed",
+                            error: inventoryErr.message,
                           });
                         });
                       }
 
-                      console.log("ORDER CREATED & STOCK DEDUCTED:", orderId);
+                      db.commit((commitErr) => {
+                        if (commitErr) {
+                          return db.rollback(() => {
+                            res.status(500).json({
+                              message: "Transaction commit failed",
+                              error: commitErr.message,
+                            });
+                          });
+                        }
 
-                      return res.status(201).json({
-                        message: "Order placed successfully",
-                        orderId: orderId,
-                        productName: product.name,
-                        remainingStock: productStock - quantity,
+                        console.log(
+                          "ORDER CREATED & STOCK DEDUCTED:",
+                          orderId
+                        );
+
+                        return res.status(201).json({
+                          message: "Order placed successfully",
+                          orderId,
+                          productName: product.name,
+                          remainingStock: productStock - quantity,
+                        });
                       });
-                    });
-                  }
-                );
-              }
-            );
-          });
+                    }
+                  );
+                }
+              );
+            }
+          );
         }
       );
     });
@@ -1806,29 +1828,30 @@ app.get(
   (req, res) => {
     db.query(
       `
-        SELECT
-          o.id,
-          o.user_id,
-          o.product_id,
-          o.quantity,
-          COALESCE(o.amount, o.total, 0) AS amount,
-          COALESCE(o.price, p.price, 0) AS price,
-          COALESCE(o.order_status, o.status, 'Processing') AS order_status,
-          COALESCE(o.payment_status, 'Pending') AS payment_status,
-          COALESCE(o.current_location, 'Warehouse') AS current_location,
-          o.created_at,
-          COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
-          p.image AS product_image,
-          p.category AS product_category
-        FROM orders o
-        LEFT JOIN products p ON o.product_id = p.id
-        WHERE o.user_id = ?
-        ORDER BY o.id DESC
+      SELECT
+        o.id,
+        o.user_id,
+        o.product_id,
+        o.quantity,
+        COALESCE(o.amount, o.total, 0) AS amount,
+        COALESCE(o.price, p.price, 0) AS price,
+        COALESCE(o.order_status, o.status, 'Processing') AS order_status,
+        COALESCE(o.payment_status, 'Pending') AS payment_status,
+        COALESCE(o.current_location, 'Warehouse') AS current_location,
+        o.created_at,
+        COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
+        p.image AS product_image,
+        p.category AS product_category
+      FROM orders o
+      LEFT JOIN products p ON o.product_id = p.id
+      WHERE o.user_id = ?
+      ORDER BY o.id DESC
       `,
       [req.user.id],
       (err, results) => {
         if (err) {
           console.error("MY ORDERS ERROR:", err);
+
           return res.status(500).json({
             message: "Failed to fetch orders",
             error: err.message,
@@ -1852,31 +1875,32 @@ app.get(
   (req, res) => {
     db.query(
       `
-        SELECT
-          o.id,
-          o.user_id,
-          o.product_id,
-          o.quantity,
-          COALESCE(o.amount, o.total, 0) AS amount,
-          COALESCE(o.price, p.price, 0) AS price,
-          COALESCE(o.order_status, o.status, 'Processing') AS order_status,
-          COALESCE(o.payment_status, 'Pending') AS payment_status,
-          COALESCE(o.current_location, 'Warehouse') AS current_location,
-          o.created_at,
-          COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
-          p.image AS product_image,
-          p.category AS product_category,
-          COALESCE(u.name, 'Customer') AS user_name,
-          u.email AS user_email,
-          u.mobile AS user_phone
-        FROM orders o
-        LEFT JOIN products p ON o.product_id = p.id
-        LEFT JOIN users u ON o.user_id = u.id
-        ORDER BY o.id DESC
+      SELECT
+        o.id,
+        o.user_id,
+        o.product_id,
+        o.quantity,
+        COALESCE(o.amount, o.total, 0) AS amount,
+        COALESCE(o.price, p.price, 0) AS price,
+        COALESCE(o.order_status, o.status, 'Processing') AS order_status,
+        COALESCE(o.payment_status, 'Pending') AS payment_status,
+        COALESCE(o.current_location, 'Warehouse') AS current_location,
+        o.created_at,
+        COALESCE(p.name, CONCAT('Product #', o.product_id)) AS product_name,
+        p.image AS product_image,
+        p.category AS product_category,
+        COALESCE(u.name, 'Customer') AS user_name,
+        u.email AS user_email,
+        u.mobile AS user_phone
+      FROM orders o
+      LEFT JOIN products p ON o.product_id = p.id
+      LEFT JOIN users u ON o.user_id = u.id
+      ORDER BY o.id DESC
       `,
       (err, results) => {
         if (err) {
           console.error("GET ALL ORDERS ERROR:", err);
+
           return res.status(500).json({
             message: "Failed to fetch orders",
             error: err.message,
@@ -1898,255 +1922,65 @@ app.put(
   authenticateToken,
   requireAdmin,
   (req, res) => {
-
-    const orderId =
-      req.params.id;
+    const orderId = req.params.id;
 
     const {
       payment_status,
       order_status,
       current_location,
       status,
-    } = req.body;
+    } = req.body || {};
 
-    console.log("");
-    console.log(
-      "================================="
-    );
-    console.log(
-      "UPDATE ORDER REQUEST"
-    );
-    console.log(
-      "Order ID:",
-      orderId
-    );
-    console.log(
-      "Payment Status:",
-      payment_status
-    );
-    console.log(
-      "Order Status:",
-      order_status
-    );
-    console.log(
-      "Location:",
-      current_location
-    );
-    console.log(
-      "================================="
-    );
-
-    const finalStatus =
-      order_status || status;
+    const finalStatus = order_status || status;
 
     if (!finalStatus) {
       return res.status(400).json({
-        message:
-          "Order status is required",
+        message: "Order status is required",
       });
     }
 
-    db.query(
-      "SHOW COLUMNS FROM orders",
-      (columnErr, columns) => {
+    const updates = ["status = ?", "order_status = ?"];
+    const values = [finalStatus, finalStatus];
 
-        if (columnErr) {
-          console.error(
-            "SHOW ORDER COLUMNS ERROR:",
-            columnErr
-          );
+    if (payment_status !== undefined) {
+      updates.push("payment_status = ?");
+      values.push(payment_status);
+    }
 
-          return res.status(500).json({
-            message:
-              "Could not inspect orders table",
-            error:
-              columnErr.message,
-          });
-        }
+    if (current_location !== undefined) {
+      updates.push("current_location = ?");
+      values.push(current_location);
+    }
 
-        const columnNames =
-          columns.map(
-            (column) =>
-              column.Field
-          );
+    values.push(orderId);
 
-        console.log(
-          "ORDER TABLE COLUMNS:",
-          columnNames
-        );
+    const sql = `
+      UPDATE orders
+      SET ${updates.join(", ")}
+      WHERE id = ?
+    `;
 
-        const updates = [];
-        const values = [];
+    db.query(sql, values, (err, result) => {
+      if (err) {
+        console.error("UPDATE ORDER ERROR:", err);
 
-        // -------------------------------------------------
-        // ORDER STATUS
-        // -------------------------------------------------
-
-        if (
-          columnNames.includes(
-            "status"
-          )
-        ) {
-          updates.push(
-            "status = ?"
-          );
-
-          values.push(
-            finalStatus
-          );
-        }
-
-        // -------------------------------------------------
-        // ORDER STATUS FALLBACK
-        // -------------------------------------------------
-
-        else if (
-          columnNames.includes(
-            "order_status"
-          )
-        ) {
-          updates.push(
-            "order_status = ?"
-          );
-
-          values.push(
-            finalStatus
-          );
-        }
-
-        // -------------------------------------------------
-        // PAYMENT STATUS
-        // -------------------------------------------------
-
-        if (
-          columnNames.includes(
-            "payment_status"
-          ) &&
-          payment_status !==
-            undefined
-        ) {
-          updates.push(
-            "payment_status = ?"
-          );
-
-          values.push(
-            payment_status
-          );
-        }
-
-        // -------------------------------------------------
-        // CURRENT LOCATION
-        // -------------------------------------------------
-
-        if (
-          columnNames.includes(
-            "current_location"
-          ) &&
-          current_location !==
-            undefined
-        ) {
-          updates.push(
-            "current_location = ?"
-          );
-
-          values.push(
-            current_location
-          );
-        }
-
-        if (
-          updates.length === 0
-        ) {
-          return res.status(400).json({
-            message:
-              "No order fields available to update",
-          });
-        }
-
-        values.push(
-          orderId
-        );
-
-        const sql = `
-          UPDATE orders
-          SET ${updates.join(", ")}
-          WHERE id = ?
-        `;
-
-        console.log(
-          "UPDATE ORDER SQL:"
-        );
-
-        console.log(sql);
-
-        console.log(
-          "UPDATE VALUES:",
-          values
-        );
-
-        db.query(
-          sql,
-          values,
-          (
-            err,
-            result
-          ) => {
-
-            if (err) {
-              console.error("");
-              console.error(
-                "================================="
-              );
-              console.error(
-                "UPDATE ORDER DATABASE ERROR"
-              );
-              console.error(
-                "Message:",
-                err.message
-              );
-              console.error(
-                "Code:",
-                err.code
-              );
-              console.error(
-                "SQL Message:",
-                err.sqlMessage
-              );
-              console.error(
-                "================================="
-              );
-
-              return res.status(500).json({
-                message:
-                  "Order could not be updated",
-                error:
-                  err.message,
-                code:
-                  err.code,
-                sqlMessage:
-                  err.sqlMessage,
-              });
-            }
-
-            console.log(
-              "ORDER UPDATED SUCCESSFULLY"
-            );
-
-            console.log(
-              "Affected rows:",
-              result.affectedRows
-            );
-
-            res.json({
-              message:
-                "Order updated successfully",
-              orderId:
-                orderId,
-            });
-          }
-        );
+        return res.status(500).json({
+          message: "Order could not be updated",
+          error: err.message,
+        });
       }
-    );
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json({
+          message: "Order not found",
+        });
+      }
+
+      res.json({
+        message: "Order updated successfully",
+        orderId,
+      });
+    });
   }
 );
 
@@ -2159,25 +1993,19 @@ app.get(
   authenticateToken,
   requireAdmin,
   (req, res) => {
-
     db.query(
       "SHOW COLUMNS FROM orders",
       (err, results) => {
-
         if (err) {
           return res.status(500).json({
-            message:
-              "Could not inspect orders table",
-            error:
-              err.message,
+            message: "Could not inspect orders table",
+            error: err.message,
           });
         }
 
         res.json({
-          message:
-            "Orders table structure",
-          columns:
-            results,
+          message: "Orders table structure",
+          columns: results,
         });
       }
     );
@@ -2205,7 +2033,7 @@ app.get(
 
       // 1. KPI metrics
       const [productStats] = await runQuery(`
-        SELECT 
+        SELECT
           COUNT(*) AS totalProducts,
           COALESCE(SUM(stock), 0) AS totalStock,
           COUNT(CASE WHEN stock <= 10 AND stock > 0 THEN 1 END) AS lowStock,
@@ -2214,24 +2042,64 @@ app.get(
       `);
 
       const [orderStats] = await runQuery(`
-        SELECT 
+        SELECT
           COUNT(*) AS totalOrders,
-          COALESCE(SUM(CASE WHEN payment_status != 'Failed' THEN COALESCE(total, amount, 0) ELSE 0 END), 0) AS totalSales,
-          COALESCE(SUM(CASE WHEN DATE(created_at) = CURDATE() AND payment_status != 'Failed' THEN COALESCE(total, amount, 0) ELSE 0 END), 0) AS todaySales,
-          COUNT(CASE WHEN order_status = 'Pending' OR status = 'Pending' THEN 1 END) AS pendingOrders,
-          COUNT(CASE WHEN order_status = 'Delivered' OR status = 'Delivered' THEN 1 END) AS deliveredOrders
+          COALESCE(
+            SUM(
+              CASE
+                WHEN payment_status != 'Failed'
+                THEN COALESCE(total, amount, 0)
+                ELSE 0
+              END
+            ), 0
+          ) AS totalSales,
+          COALESCE(
+            SUM(
+              CASE
+                WHEN DATE(created_at) = CURDATE()
+                  AND payment_status != 'Failed'
+                THEN COALESCE(total, amount, 0)
+                ELSE 0
+              END
+            ), 0
+          ) AS todaySales,
+          COUNT(
+            CASE
+              WHEN order_status = 'Pending' OR status = 'Pending'
+              THEN 1
+            END
+          ) AS pendingOrders,
+          COUNT(
+            CASE
+              WHEN order_status = 'Delivered' OR status = 'Delivered'
+              THEN 1
+            END
+          ) AS deliveredOrders
         FROM orders
       `);
 
-      const [categoryStats] = await runQuery("SELECT COUNT(*) AS totalCategories FROM categories");
-      const [userStats] = await runQuery("SELECT COUNT(*) AS totalUsers FROM users WHERE role = 'user'");
+      const [categoryStats] = await runQuery(
+        "SELECT COUNT(*) AS totalCategories FROM categories"
+      );
 
-      // 2. Sales Timeline (by date from real orders)
+      const [userStats] = await runQuery(
+        "SELECT COUNT(*) AS totalUsers FROM users WHERE role = 'user'"
+      );
+
+      // 2. Sales timeline
       const salesTimeline = await runQuery(`
-        SELECT 
+        SELECT
           DATE_FORMAT(created_at, '%b %d') AS date,
           DATE(created_at) AS rawDate,
-          COALESCE(SUM(CASE WHEN payment_status != 'Failed' THEN COALESCE(total, amount, 0) ELSE 0 END), 0) AS revenue,
+          COALESCE(
+            SUM(
+              CASE
+                WHEN payment_status != 'Failed'
+                THEN COALESCE(total, amount, 0)
+                ELSE 0
+              END
+            ), 0
+          ) AS revenue,
           COUNT(*) AS orderCount
         FROM orders
         GROUP BY rawDate, date
@@ -2239,7 +2107,7 @@ app.get(
         LIMIT 14
       `);
 
-      // 3. Recent Orders
+      // 3. Recent orders
       const recentOrders = await runQuery(`
         SELECT
           o.id,
@@ -2262,7 +2130,7 @@ app.get(
         LIMIT 8
       `);
 
-      // 4. Top Selling Products
+      // 4. Top selling products
       const topSellingProducts = await runQuery(`
         SELECT
           p.id,
@@ -2272,15 +2140,20 @@ app.get(
           p.price,
           p.stock,
           COALESCE(SUM(o.quantity), 0) AS total_sold,
-          COALESCE(SUM(COALESCE(o.total, o.amount, 0)), 0) AS total_revenue
+          COALESCE(
+            SUM(COALESCE(o.total, o.amount, 0)), 0
+          ) AS total_revenue
         FROM products p
-        LEFT JOIN orders o ON p.id = o.product_id AND o.payment_status != 'Failed'
-        GROUP BY p.id, p.name, p.image, p.category, p.price, p.stock
+        LEFT JOIN orders o
+          ON p.id = o.product_id
+          AND o.payment_status != 'Failed'
+        GROUP BY
+          p.id, p.name, p.image, p.category, p.price, p.stock
         ORDER BY total_sold DESC, p.id DESC
         LIMIT 5
       `);
 
-      // 5. Low Stock Products (stock <= 10)
+      // 5. Low stock products
       const lowStockProducts = await runQuery(`
         SELECT
           id,
@@ -2295,18 +2168,18 @@ app.get(
         LIMIT 8
       `);
 
-      // 6. Order Status breakdown
+      // 6. Order status breakdown
       const orderStatusCounts = await runQuery(`
-        SELECT 
+        SELECT
           COALESCE(order_status, status, 'Processing') AS status_name,
           COUNT(*) AS count
         FROM orders
         GROUP BY status_name
       `);
 
-      // 7. Payment Status breakdown
+      // 7. Payment status breakdown
       const paymentStatusCounts = await runQuery(`
-        SELECT 
+        SELECT
           COALESCE(payment_status, 'Pending') AS status_name,
           COUNT(*) AS count
         FROM orders
@@ -2318,7 +2191,13 @@ app.get(
         totalStock: Number(productStats.totalStock || 0),
         lowStock: Number(productStats.lowStock || 0),
         outOfStock: Number(productStats.outOfStock || 0),
-        healthyStock: Math.max(0, Number(productStats.totalProducts || 0) - Number(productStats.lowStock || 0) - Number(productStats.outOfStock || 0)),
+
+        healthyStock: Math.max(
+          0,
+          Number(productStats.totalProducts || 0) -
+          Number(productStats.lowStock || 0) -
+          Number(productStats.outOfStock || 0)
+        ),
 
         totalOrders: Number(orderStats.totalOrders || 0),
         totalSales: Number(orderStats.totalSales || 0),
@@ -2338,6 +2217,7 @@ app.get(
       });
     } catch (error) {
       console.error("DASHBOARD ERROR:", error);
+
       res.status(500).json({
         message: "Failed to load dashboard data",
         error: error.message,
@@ -2347,66 +2227,29 @@ app.get(
 );
 
 // =====================================================
-// ERROR HANDLER
+// GLOBAL ERROR HANDLER
 // =====================================================
 
-app.use(
-  (
-    err,
-    req,
-    res,
-    next
-  ) => {
+app.use((err, req, res, next) => {
+  console.error("SERVER ERROR:", err);
 
-    console.error(
-      "SERVER ERROR:",
-      err
-    );
-
-    res.status(500).json({
-      message:
-        "Internal server error",
-      error:
-        err.message,
-    });
+  if (res.headersSent) {
+    return next(err);
   }
-);
+
+  res.status(err.status || 500).json({
+    message:
+      err.status && err.status < 500
+        ? err.message
+        : "Internal server error",
+  });
+});
 
 // =====================================================
-// START SERVER
+// EXPORT EXPRESS APP FOR VERCEL
 // =====================================================
 
-setupOrdersTable(
-  (setupError) => {
-
-    if (setupError) {
-      console.error(
-        "WARNING: Orders table setup failed."
-      );
-
-      console.error(
-        setupError.message
-      );
-    }
-
-    app.listen(
-      PORT,
-      () => {
-
-        console.log(
-          "================================="
-        );
-
-        console.log(
-          `Server running on port ${PORT}`
-        );
-
-        console.log(
-          "================================="
-        );
-      }
-    );
-  }
-);
+// Vercel imports this Express application as a serverless function.
+// Do not call app.listen() here.
 
 module.exports = app;

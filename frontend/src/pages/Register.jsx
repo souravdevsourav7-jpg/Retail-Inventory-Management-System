@@ -36,7 +36,7 @@ function Register({ onBackToLogin }) {
       setLoading(true);
 
       const response = await axios.post(
-        "http://localhost:5000/api/send-otp",
+        "/api/send-otp",
         {
           email: email.trim(),
         }
@@ -78,7 +78,7 @@ function Register({ onBackToLogin }) {
       setLoading(true);
 
       const response = await axios.post(
-        "http://localhost:5000/api/verify-otp",
+        "/api/verify-otp",
         {
           email: email.trim(),
           otp: otp.trim(),
@@ -143,7 +143,7 @@ function Register({ onBackToLogin }) {
       setLoading(true);
 
       const response = await axios.post(
-        "http://localhost:5000/api/register",
+        "/api/register",
         {
           name: name.trim(),
           email: email.trim(),

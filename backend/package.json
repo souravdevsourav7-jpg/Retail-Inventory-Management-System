@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js",
-    "check": "node --check server.js"
+    "start": "node -e \"require('./server').listen(process.env.PORT || 5000)\"",
+    "check": "node --check server.js && node --check db.js"
   },
   "keywords": [],
   "author": "",

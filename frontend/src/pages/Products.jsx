@@ -275,10 +275,25 @@ function Products({ onNavigate, initialSearch = "" }) {
 
   function handleImageSelect(e) {
     const file = e.target.files[0];
-    if (file) {
-      setImageFile(file);
-      setImagePreview(URL.createObjectURL(file));
+    if (!file) return;
+
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+    if (!allowedTypes.includes(file.type)) {
+      setFormError("Choose a JPG, PNG, WEBP, or GIF image.");
+      e.target.value = "";
+      return;
     }
+
+    if (file.size > 2 * 1024 * 1024) {
+      setFormError("Image size must be 2MB or smaller.");
+      e.target.value = "";
+      return;
+    }
+
+    setFormError("");
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
   }
 
   async function handleFormSubmit(e) {

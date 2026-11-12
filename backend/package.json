@@ -2,9 +2,11 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "check": "node --check server.js"
   },
   "keywords": [],
   "author": "",
@@ -18,5 +20,8 @@
     "multer": "^2.4.0",
     "mysql2": "^3.24.4",
     "nodemailer": "^10.0.13"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

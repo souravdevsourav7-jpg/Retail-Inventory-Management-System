@@ -171,7 +171,7 @@ function MyOrders({ onNavigate }) {
     try {
       const token = getToken();
 
-      const response = await axios.get(`${API_BASE}/orders`, {
+      const response = await axios.get(`${API_BASE}/my-orders`, {
         headers: token
           ? { Authorization: `Bearer ${token}` }
           : {},

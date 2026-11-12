@@ -103,7 +103,7 @@ The Vite development server proxies `/api` and `/uploads` to `http://localhost:5
 
 ## Deployment notes
 
-- Product images uploaded through the application are stored as data URLs in the MySQL `products.image` column. The backend automatically upgrades that column to `MEDIUMTEXT` during initialization.
+- Product images uploaded through the application are stored in the MySQL `products.image` column. The backend automatically upgrades that column to `MEDIUMTEXT` during initialization and serves each image from `/api/products/:id/image`, keeping product and order JSON responses small.
 - Image uploads are limited to 2 MB and common image formats (JPG, PNG, WEBP, GIF).
 - The MySQL pool is limited to five connections per backend instance. Keep the total number of concurrent Vercel instances within your Aiven connection limits.
 - The first backend request may take longer while database tables and compatibility columns are checked/created.

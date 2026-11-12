@@ -18,7 +18,7 @@ function Login({ onLogin, onCreateAccount }) {
 
     try {
       const response = await axios.post(
-        "http://localhost:5000/api/login",
+        "/api/login",
         {
           email: email.trim(),
           password: password,

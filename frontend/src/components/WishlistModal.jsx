@@ -12,7 +12,7 @@ function WishlistModal({
   function getProductImage(prod) {
     if (prod.image && prod.image.trim() !== "") {
       if (prod.image.startsWith("http")) return prod.image;
-      return `http://localhost:5000${prod.image}`;
+      return `${prod.image}`;
     }
     return `https://placehold.co/200x150?text=${encodeURIComponent(prod.name || "Product")}`;
   }

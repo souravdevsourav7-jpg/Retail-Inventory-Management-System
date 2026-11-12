@@ -13,7 +13,6 @@ const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
 const crypto = require("crypto");
 
 // =====================================================
@@ -28,6 +27,7 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/api/health", (req, res) => {
   const required = [
     "DB_HOST",
+    "DB_PORT",
     "DB_USER",
     "DB_PASSWORD",
     "DB_NAME",
@@ -683,6 +683,9 @@ function uploadedImageDataUrl(file) {
   if (!file) return null;
   return "data:" + file.mimetype + ";base64," + file.buffer.toString("base64");
 }
+
+// Continue serving any legacy, repository-tracked images.
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // =====================================================
 // PRODUCTS - GET

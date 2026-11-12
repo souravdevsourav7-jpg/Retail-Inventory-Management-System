@@ -37,7 +37,7 @@ function AdminDashboard({ onNavigate }) {
       setLoading(true);
       setError("");
 
-      const response = await axios.get("http://localhost:5000/api/dashboard", {
+      const response = await axios.get("/api/dashboard", {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -414,7 +414,7 @@ function AdminDashboard({ onNavigate }) {
                       <div className="table-product-cell">
                         {order.product_image ? (
                           <img
-                            src={`http://localhost:5000${order.product_image}`}
+                            src={`${order.product_image}`}
                             alt={order.product_name}
                             className="table-product-thumb"
                           />
@@ -489,7 +489,7 @@ function AdminDashboard({ onNavigate }) {
                     <div className="top-seller-img-box">
                       {prod.image ? (
                         <img
-                          src={`http://localhost:5000${prod.image}`}
+                          src={`${prod.image}`}
                           alt={prod.name}
                         />
                       ) : (

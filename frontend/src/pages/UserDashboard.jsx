@@ -236,7 +236,7 @@ function UserDashboard({ user, onNavigate }) {
   // Helper for image url
   function getProductImage(product) {
     if (product && product.image && product.image.trim() !== "") {
-      if (product.image.startsWith("http")) return product.image;
+      if (product.image.startsWith("http") || product.image.startsWith("data:")) return product.image;
       const normalized = product.image.startsWith("/") ? product.image : `/${product.image}`;
       return `${normalized}`;
     }
